@@ -17,3 +17,6 @@ app/android/local.properties
 app/android/key.properties
 app/ios/Pods/
 __pycache__/
+
+# Locally built APK, firmware and rendered media.
+artifacts/

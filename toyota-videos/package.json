@@ -1,0 +1,37 @@
+{
+  "name": "toyota-videos",
+  "version": "1.0.0",
+  "description": "Six seamless 800x800 Toyota loops for the Znachok ESP32-P4 display",
+  "repository": {},
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@remotion/cli": "4.0.515",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.515"
+  },
+  "devDependencies": {
+    "@remotion/eslint-config-flat": "4.0.515",
+    "@types/react": "19.2.7",
+    "@types/web": "0.0.166",
+    "eslint": "9.19.0",
+    "prettier": "3.8.1",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "dev": "remotion studio",
+    "build": "remotion bundle",
+    "render:pulse": "remotion render ToyotaPulseP4 out/toyota-pulse-p4.mp4 --codec=h264 --crf=18",
+    "render:circuit": "remotion render ToyotaNightCircuitP4 out/toyota-night-circuit-p4.mp4 --codec=h264 --crf=18",
+    "render:eye": "remotion render ToyotaEyePortalP4 out/toyota-eye-portal-p4.mp4 --codec=h264 --crf=18",
+    "render:sakura": "remotion render ToyotaSakuraReactorP4 out/toyota-sakura-reactor-p4.mp4 --codec=h264 --crf=18",
+    "render:kintsugi": "remotion render ToyotaKintsugiCoreP4 out/toyota-kintsugi-core-p4.mp4 --codec=h264 --crf=18",
+    "render:origami": "remotion render ToyotaOrigamiVelocityP4 out/toyota-origami-velocity-p4.mp4 --codec=h264 --crf=18",
+    "upgrade": "remotion upgrade",
+    "lint": "eslint src && tsc"
+  },
+  "sideEffects": [
+    "*.css"
+  ]
+}
