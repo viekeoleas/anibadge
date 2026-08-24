@@ -1,5 +1,6 @@
 #include <Arduino.h>
 
+#include "p4_control.h"
 #include "p4_display.h"
 #include "p4_runtime.h"
 #include "p4_storage.h"
@@ -34,6 +35,7 @@ void setup() {
 
   if (!p4storage::begin()) Serial.println("FATAL: storage unavailable");
   if (!p4web::begin()) Serial.println("FATAL: Wi-Fi upload unavailable");
+  if (!p4control::begin()) Serial.println("FATAL: BLE control unavailable");
   if (!p4display::begin()) {
     Serial.println("FATAL: display unavailable");
     return;
@@ -52,10 +54,11 @@ void setup() {
 #endif
 
   p4runtime::play_startup_media();
-  Serial.println("READY: upload GIF or ZSHOW over Wi-Fi");
+  Serial.println("READY: BLE control available; Wi-Fi starts per session");
 }
 
 void loop() {
+  p4control::poll();
   p4web::poll();
   p4runtime::poll();
   if (p4storage::take_show_play_request()) {

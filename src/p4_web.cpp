@@ -12,16 +12,23 @@
 namespace p4web {
 namespace {
 
-constexpr char kSsid[] = "Znachok-BMW";
-constexpr char kPassword[] = "bmw-display";
 WebServer server(80);
 bool upload_ok = false;
 bool show_upload_error_visible = false;
+bool ap_active = false;
+bool upload_in_progress = false;
+uint32_t ap_deadline_ms = 0;
+uint32_t ap_lifetime_ms = 0;
 enum class UploadKind : uint8_t { kGif, kShow };
 UploadKind upload_kind = UploadKind::kGif;
 size_t upload_expected = 0;
 size_t upload_received = 0;
 uint8_t shown_percent = 255;
+uint32_t upload_start_ms = 0;
+
+void extend_ap_deadline() {
+  if (ap_active) ap_deadline_ms = millis() + ap_lifetime_ms;
+}
 
 void update_upload_progress() {
   if (upload_expected == 0) return;
@@ -44,12 +51,15 @@ void update_upload_progress() {
 void receive_upload(UploadKind kind) {
   HTTPUpload &upload = server.upload();
   if (upload.status == UPLOAD_FILE_START) {
+    upload_in_progress = true;
+    extend_ap_deadline();
     upload_kind = kind;
     if (kind == UploadKind::kShow) show_upload_error_visible = false;
     upload_expected = static_cast<size_t>(
         strtoull(server.arg("size").c_str(), nullptr, 10));
     upload_received = 0;
     shown_percent = 255;
+    upload_start_ms = millis();
     // The decoder owns the screen from another task. Stop it before rendering
     // upload status so the GIF and progress screen cannot alternate/flicker.
     p4runtime::stop();
@@ -68,6 +78,7 @@ void receive_upload(UploadKind kind) {
       p4uploadui::show_error();
     }
   } else if (upload.status == UPLOAD_FILE_WRITE) {
+    extend_ap_deadline();
     if (upload_ok) {
       upload_ok = p4storage::write_stream_upload(upload.buf, upload.currentSize);
       if (upload_ok) {
@@ -79,6 +90,16 @@ void receive_upload(UploadKind kind) {
       }
     }
   } else if (upload.status == UPLOAD_FILE_END) {
+    upload_in_progress = false;
+    extend_ap_deadline();
+    const uint32_t transfer_ms = millis() - upload_start_ms;
+    Serial.printf("HTTP %s: transfer %u bytes in %u ms (%.1f KB/s)\n",
+                  upload_kind == UploadKind::kShow ? "SHOW" : "GIF",
+                  static_cast<unsigned>(upload_received),
+                  static_cast<unsigned>(transfer_ms),
+                  transfer_ms > 0
+                      ? upload_received / 1.024 / transfer_ms
+                      : 0.0);
     if (upload_ok) {
       upload_ok = upload_kind == UploadKind::kShow
                       ? p4storage::finish_show_stream_upload()
@@ -101,6 +122,7 @@ void receive_upload(UploadKind kind) {
       p4uploadui::show_error();
     }
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    upload_in_progress = false;
     p4storage::abort_stream_upload();
     upload_ok = false;
     if (upload_kind == UploadKind::kShow) show_upload_error_visible = true;
@@ -144,7 +166,7 @@ void show_status_request() {
   const String body = String("{\"state\":\"") + state +
                       "\",\"installed\":" +
                       (installed ? "true" : "false") +
-                      ",\"playerVersion\":\"2.1.0\",\"frame\":" +
+                      ",\"playerVersion\":\"2.2.0\",\"frame\":" +
                       p4showplayer::current_frame_index() +
                       ",\"frames\":" + p4showplayer::frame_count() +
                       ",\"cycles\":" + p4showplayer::completed_cycles() +
@@ -166,8 +188,6 @@ void clear_media_request() {
 }  // namespace
 
 bool begin() {
-  WiFi.mode(WIFI_AP);
-  if (!WiFi.softAP(kSsid, kPassword)) return false;
   server.on("/health", HTTP_GET,
             []() { server.send(200, "text/plain", "OK"); });
   server.on(
@@ -179,12 +199,55 @@ bool begin() {
   server.on("/show/clear", HTTP_POST, clear_media_request);
   server.onNotFound(
       []() { server.send(404, "application/json", "{\"ok\":false}"); });
-  server.begin();
-  Serial.printf("WIFI READY: %s, http://%s/, password %s\n", kSsid,
-                WiFi.softAPIP().toString().c_str(), kPassword);
+  Serial.println("WIFI READY: waiting for BLE publish session");
   return true;
 }
 
-void poll() { server.handleClient(); }
+bool start_temporary_ap(const char *ssid, const char *password,
+                        uint32_t lifetime_ms) {
+  if (ssid == nullptr || password == nullptr || strlen(password) < 8 ||
+      lifetime_ms < 10000) {
+    return false;
+  }
+  if (ap_active) stop_temporary_ap();
+  WiFi.mode(WIFI_AP);
+  if (!WiFi.softAP(ssid, password)) {
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+  server.begin();
+  ap_active = true;
+  upload_in_progress = false;
+  ap_lifetime_ms = lifetime_ms;
+  extend_ap_deadline();
+  Serial.printf("WIFI SESSION: %s, http://%s/, ttl=%u ms\n", ssid,
+                WiFi.softAPIP().toString().c_str(),
+                static_cast<unsigned>(lifetime_ms));
+  return true;
+}
+
+void stop_temporary_ap() {
+  if (!ap_active) return;
+  server.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  ap_active = false;
+  upload_in_progress = false;
+  ap_deadline_ms = 0;
+  ap_lifetime_ms = 0;
+  Serial.println("WIFI SESSION: closed");
+}
+
+bool temporary_ap_active() { return ap_active; }
+
+void poll() {
+  if (!ap_active) return;
+  server.handleClient();
+  if (!upload_in_progress &&
+      static_cast<int32_t>(millis() - ap_deadline_ms) >= 0) {
+    Serial.println("WIFI SESSION: expired");
+    stop_temporary_ap();
+  }
+}
 
 }  // namespace p4web

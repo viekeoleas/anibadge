@@ -10,11 +10,12 @@ import {
   useVideoConfig,
 } from "remotion";
 import {ToyotaEyePortal} from "./ToyotaEye";
-import {
-  ToyotaKintsugiCore,
-  ToyotaOrigamiVelocity,
-  ToyotaSakuraReactor,
-} from "./ToyotaDreams";
+import {ToyotaKintsugiCore} from "./ToyotaDreams";
+import {ToyotaCelicaBlueprint, ToyotaCelicaNightRun} from "./ToyotaCelica";
+import {ToyotaCelicaLaserResurrection} from "./ToyotaCelicaLaser";
+import {ToyotaPortalEngine} from "./ToyotaPortalEngine";
+import {ToyotaPerspectiveTemple} from "./ToyotaPerspectiveTemple";
+import {BmwJoyShift, BmwMVelocity, BmwOrbit} from "./BmwShowcase";
 
 export const CANVAS_SIZE = 800;
 export const FPS = 30;
@@ -540,8 +541,8 @@ export const ToyotaCompositions: React.FC = () => {
         height={CANVAS_SIZE}
       />
       <Composition
-        id="ToyotaSakuraReactorP4"
-        component={ToyotaSakuraReactor}
+        id="ToyotaCelicaNightRunP4"
+        component={ToyotaCelicaNightRun}
         durationInFrames={FPS * 8}
         fps={FPS}
         width={CANVAS_SIZE}
@@ -556,9 +557,57 @@ export const ToyotaCompositions: React.FC = () => {
         height={CANVAS_SIZE}
       />
       <Composition
-        id="ToyotaOrigamiVelocityP4"
-        component={ToyotaOrigamiVelocity}
+        id="ToyotaCelicaBlueprintP4"
+        component={ToyotaCelicaBlueprint}
         durationInFrames={FPS * 8}
+        fps={FPS}
+        width={CANVAS_SIZE}
+        height={CANVAS_SIZE}
+      />
+      <Composition
+        id="ToyotaCelicaLaserResurrectionP4"
+        component={ToyotaCelicaLaserResurrection}
+        durationInFrames={FPS * 8}
+        fps={FPS}
+        width={CANVAS_SIZE}
+        height={CANVAS_SIZE}
+      />
+      <Composition
+        id="BmwJoyShiftP4"
+        component={BmwJoyShift}
+        durationInFrames={FPS * 10}
+        fps={FPS}
+        width={CANVAS_SIZE}
+        height={CANVAS_SIZE}
+      />
+      <Composition
+        id="BmwMVelocityP4"
+        component={BmwMVelocity}
+        durationInFrames={FPS * 10}
+        fps={FPS}
+        width={CANVAS_SIZE}
+        height={CANVAS_SIZE}
+      />
+      <Composition
+        id="BmwOrbitP4"
+        component={BmwOrbit}
+        durationInFrames={FPS * 10}
+        fps={FPS}
+        width={CANVAS_SIZE}
+        height={CANVAS_SIZE}
+      />
+      <Composition
+        id="ToyotaPortalEngineP4"
+        component={ToyotaPortalEngine}
+        durationInFrames={FPS * 10}
+        fps={FPS}
+        width={CANVAS_SIZE}
+        height={CANVAS_SIZE}
+      />
+      <Composition
+        id="ToyotaPerspectiveTempleP4"
+        component={ToyotaPerspectiveTemple}
+        durationInFrames={FPS * 10}
         fps={FPS}
         width={CANVAS_SIZE}
         height={CANVAS_SIZE}

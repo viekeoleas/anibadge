@@ -5,42 +5,23 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
-import 'package:image/image.dart' as image;
 
 import 'compiled_frame_cache.dart';
+import 'frame_pipeline.dart';
 import 'media_timeline.dart';
 import 'project_model.dart';
+import 'ui_frame_pipeline.dart';
 import 'video_manifest.dart';
 
-const int _canvasSize = 800;
+export 'frame_pipeline.dart'
+    show DartFramePipeline, FramePipeline, ShowCompileException;
+export 'ui_frame_pipeline.dart' show UiFramePipeline;
+
+const int _canvasSize = showCanvasSize;
 const int _headerSize = 64;
 const int _frameEntrySize = 16;
-const int _maxFrameBytes = 212 * 1024;
 const int _maxPackageBytes = 20 * 1024 * 1024;
 const int _maxFrames = 20000;
-final List<({int left, int right})> _circleBounds = List.generate(
-  _canvasSize,
-  (y) {
-    const center = (_canvasSize - 1) / 2;
-    const radiusSquared = center * center;
-    final dy = y - center;
-    final halfWidth = math.sqrt(radiusSquared - dy * dy);
-    return (
-      left: (center - halfWidth).ceil(),
-      right: (center + halfWidth).floor(),
-    );
-  },
-  growable: false,
-);
-
-class ShowCompileException implements Exception {
-  const ShowCompileException(this.message);
-
-  final String message;
-
-  @override
-  String toString() => message;
-}
 
 class CompiledFrame {
   const CompiledFrame(this.jpeg, this.durationUs, this.clipIndex);
@@ -95,6 +76,46 @@ class ShowCompileProgress {
 }
 
 typedef ShowCompileProgressCallback = void Function(ShowCompileProgress value);
+
+/// Fast path for the application: compiles on the root isolate with the GPU
+/// pipeline (Skia decode, raster-thread rendering, native JPEG encoder). The
+/// per-frame Dart work is only orchestration, so the UI stays responsive.
+Future<CompiledShow> compileProjectFast(
+  ShowProject project, {
+  String? cacheDirectory,
+  ShowCompileProgressCallback? onProgress,
+}) async {
+  final pipeline = UiFramePipeline();
+  try {
+    return await compileProject(
+      project,
+      cacheDirectory: cacheDirectory,
+      onProgress: onProgress,
+      pipeline: pipeline,
+    );
+  } finally {
+    pipeline.dispose();
+  }
+}
+
+/// Fast transition preview on the root isolate; see [compileProjectFast].
+Future<CompiledShow> compileTransitionPreviewFast(
+  ShowClip outgoing,
+  ShowClip incoming, {
+  String? cacheDirectory,
+}) async {
+  final pipeline = UiFramePipeline();
+  try {
+    return await compileTransitionPreview(
+      outgoing,
+      incoming,
+      cacheDirectory: cacheDirectory,
+      pipeline: pipeline,
+    );
+  } finally {
+    pipeline.dispose();
+  }
+}
 
 Future<CompiledShow> compileProjectInBackground(
   ShowProject project, {
@@ -191,10 +212,12 @@ Future<CompiledShow> compileProject(
   ShowProject project, {
   String? cacheDirectory,
   ShowCompileProgressCallback? onProgress,
+  FramePipeline? pipeline,
 }) async {
   if (project.clips.isEmpty) {
     throw const ShowCompileException('Добавьте хотя бы один клип');
   }
+  final engine = pipeline ?? DartFramePipeline();
   final cache =
       cacheDirectory == null ? null : CompiledFrameCache(cacheDirectory);
   final clipFrames = <List<CompiledFrame>>[];
@@ -203,6 +226,7 @@ Future<CompiledShow> compileProject(
       project.clips[clipIndex],
       clipIndex,
       cache,
+      engine,
       onFrameProgress: (completed, total) => onProgress?.call(
         ShowCompileProgress(
           clipIndex: clipIndex,
@@ -227,6 +251,7 @@ Future<CompiledShow> compileProject(
         clip,
         clipIndex,
         cache,
+        engine,
       ));
     }
     if (frames.length > _maxFrames) {
@@ -247,11 +272,15 @@ Future<CompiledShow> compileTransitionPreview(
   ShowClip outgoing,
   ShowClip incoming, {
   String? cacheDirectory,
+  FramePipeline? pipeline,
 }) async {
+  final engine = pipeline ?? DartFramePipeline();
   final cache =
       cacheDirectory == null ? null : CompiledFrameCache(cacheDirectory);
-  final outgoingFrame = await _compileClipEdgeCached(outgoing, 0, false, cache);
-  final incomingFrame = await _compileClipEdgeCached(incoming, 1, true, cache);
+  final outgoingFrame =
+      await _compileClipEdgeCached(outgoing, 0, false, cache, engine);
+  final incomingFrame =
+      await _compileClipEdgeCached(incoming, 1, true, cache, engine);
   final frames = <CompiledFrame>[
     CompiledFrame(outgoingFrame.jpeg, 350000, 0),
     ...await _compileTransitionCached(
@@ -260,6 +289,7 @@ Future<CompiledShow> compileTransitionPreview(
       outgoing,
       0,
       cache,
+      engine,
     ),
     CompiledFrame(incomingFrame.jpeg, 350000, 1),
   ];
@@ -276,11 +306,12 @@ Future<CompiledShow> compileTransitionPreview(
 Future<List<CompiledFrame>> _compileClipCached(
   ShowClip clip,
   int clipIndex,
-  CompiledFrameCache? cache, {
+  CompiledFrameCache? cache,
+  FramePipeline engine, {
   void Function(int completed, int total)? onFrameProgress,
 }) async {
   if (cache == null) {
-    final compiled = await _compileClip(clip, clipIndex);
+    final compiled = await _compileClip(clip, clipIndex, engine);
     onFrameProgress?.call(compiled.length, compiled.length);
     return compiled;
   }
@@ -289,6 +320,7 @@ Future<List<CompiledFrame>> _compileClipCached(
       clip,
       clipIndex,
       cache,
+      engine,
       onFrameProgress: onFrameProgress,
     );
   }
@@ -297,6 +329,7 @@ Future<List<CompiledFrame>> _compileClipCached(
       clip,
       clipIndex,
       cache,
+      engine,
       onFrameProgress: onFrameProgress,
     );
   }
@@ -312,7 +345,7 @@ Future<List<CompiledFrame>> _compileClipCached(
       ),
     ];
   }
-  final compiled = await _compileClip(clip, clipIndex);
+  final compiled = await _compileClip(clip, clipIndex, engine);
   await cache.write(
     key,
     [CachedFrameData(compiled.single.jpeg, 1)],
@@ -327,15 +360,17 @@ Future<CompiledFrame> _compileClipEdgeCached(
   int clipIndex,
   bool first,
   CompiledFrameCache? cache,
+  FramePipeline engine,
 ) async {
-  if (cache == null) return _compileClipEdge(clip, clipIndex, first);
+  if (cache == null) return _compileClipEdge(clip, clipIndex, first, engine);
   if (clip.kind == ClipKind.gif) {
-    return _compileGifEdgeCached(clip, clipIndex, first, cache);
+    return _compileGifEdgeCached(clip, clipIndex, first, cache, engine);
   }
   if (clip.kind == ClipKind.mp4 || clip.kind.isGeneratedMotion) {
-    return _compileNormalizedMotionEdgeCached(clip, clipIndex, first, cache);
+    return _compileNormalizedMotionEdgeCached(
+        clip, clipIndex, first, cache, engine);
   }
-  return (await _compileClipCached(clip, clipIndex, cache)).single;
+  return (await _compileClipCached(clip, clipIndex, cache, engine)).single;
 }
 
 Future<String> _visualCacheKey(ShowClip clip) async {
@@ -371,10 +406,11 @@ Future<List<CompiledFrame>> _compileTransitionCached(
   ShowClip clip,
   int clipIndex,
   CompiledFrameCache? cache,
+  FramePipeline engine,
 ) async {
   if (clip.outgoingTransition == TransitionKind.none) return const [];
   if (cache == null) {
-    return _compileTransition(outgoing, incoming, clip, clipIndex);
+    return _compileTransition(outgoing, incoming, clip, clipIndex, engine);
   }
   final key = 'transition-${CompiledFrameCache.digestText(jsonEncode({
         'version': 2,
@@ -389,7 +425,8 @@ Future<List<CompiledFrame>> _compileTransitionCached(
         .map((frame) => CompiledFrame(frame.jpeg, frame.durationUs, clipIndex))
         .toList(growable: false);
   }
-  final compiled = _compileTransition(outgoing, incoming, clip, clipIndex);
+  final compiled =
+      await _compileTransition(outgoing, incoming, clip, clipIndex, engine);
   await cache.write(
     key,
     compiled
@@ -402,37 +439,39 @@ Future<List<CompiledFrame>> _compileTransitionCached(
 Future<List<CompiledFrame>> _compileClip(
   ShowClip clip,
   int clipIndex,
+  FramePipeline engine,
 ) async {
   if (clip.kind == ClipKind.gif) {
     final bytes = await File(clip.assetPath).readAsBytes();
-    return _compileGif(bytes, clip, clipIndex);
+    return _compileGif(bytes, clip, clipIndex, engine);
   }
   if (clip.kind == ClipKind.mp4 || clip.kind.isGeneratedMotion) {
-    return _compileNormalizedMotion(clip, clipIndex);
+    return _compileNormalizedMotion(clip, clipIndex, engine);
   }
   final bytes = await File(clip.assetPath).readAsBytes();
-  final decoded = image.decodeImage(bytes);
-  if (decoded == null) {
-    throw ShowCompileException('Не удалось декодировать ${clip.name}');
+  final decoded = await engine.decodeImage(bytes, clip.name);
+  try {
+    return [
+      CompiledFrame(
+        await engine.renderClipFrame(decoded, clip, clip.name),
+        clip.durationMs.clamp(500, 10000) * 1000,
+        clipIndex,
+      ),
+    ];
+  } finally {
+    decoded.dispose();
   }
-  final rendered = _renderFrame(decoded.frames.first, clip);
-  return [
-    CompiledFrame(
-      _encodeFrame(rendered, clip.name),
-      clip.durationMs.clamp(500, 10000) * 1000,
-      clipIndex,
-    ),
-  ];
 }
 
 Future<CompiledFrame> _compileClipEdge(
   ShowClip clip,
   int clipIndex,
   bool first,
+  FramePipeline engine,
 ) async {
   if (clip.kind == ClipKind.gif) {
     final bytes = await File(clip.assetPath).readAsBytes();
-    return _compileGifEdge(bytes, clip, clipIndex, first);
+    return _compileGifEdge(bytes, clip, clipIndex, first, engine);
   }
   if (clip.kind == ClipKind.mp4 || clip.kind.isGeneratedMotion) {
     final manifestPath = clip.normalizedPath;
@@ -442,22 +481,28 @@ Future<CompiledFrame> _compileClipEdge(
     final video = await loadNormalizedVideo(manifestPath);
     final schedule = scheduleNormalizedVideo(video, clip);
     final scheduled = first ? schedule.first : schedule.last;
-    final decoded = image.decodeJpg(await File(scheduled.path).readAsBytes());
-    if (decoded == null) {
-      throw ShowCompileException('Не удалось прочитать кадр ${clip.name}');
-    }
-    return CompiledFrame(
-      _encodeFrame(_renderFrame(decoded, clip), '${clip.name}, крайний кадр'),
-      scheduled.durationUs,
-      clipIndex,
+    final decoded = await engine.decodeImage(
+      await File(scheduled.path).readAsBytes(),
+      clip.name,
     );
+    try {
+      return CompiledFrame(
+        await engine.renderClipFrame(
+            decoded, clip, '${clip.name}, крайний кадр'),
+        scheduled.durationUs,
+        clipIndex,
+      );
+    } finally {
+      decoded.dispose();
+    }
   }
-  return (await _compileClip(clip, clipIndex)).single;
+  return (await _compileClip(clip, clipIndex, engine)).single;
 }
 
 Future<List<CompiledFrame>> _compileNormalizedMotion(
   ShowClip clip,
   int clipIndex,
+  FramePipeline engine,
 ) async {
   final manifestPath = clip.normalizedPath;
   final label = clip.kind == ClipKind.mp4 ? 'MP4 ${clip.name}' : clip.name;
@@ -470,17 +515,20 @@ Future<List<CompiledFrame>> _compileNormalizedMotion(
     final frames = <CompiledFrame>[];
     for (var index = 0; index < schedule.length; index++) {
       final scheduled = schedule[index];
-      final decoded = image.decodeJpg(await File(scheduled.path).readAsBytes());
-      if (decoded == null) {
-        throw const FormatException(
-            'Не удалось прочитать нормализованный кадр');
+      final decoded = await engine.decodeImage(
+        await File(scheduled.path).readAsBytes(),
+        clip.name,
+      );
+      try {
+        frames.add(CompiledFrame(
+          await engine.renderClipFrame(
+              decoded, clip, '${clip.name}, кадр ${index + 1}'),
+          scheduled.durationUs,
+          clipIndex,
+        ));
+      } finally {
+        decoded.dispose();
       }
-      final rendered = _renderFrame(decoded, clip);
-      frames.add(CompiledFrame(
-        _encodeFrame(rendered, '${clip.name}, кадр ${index + 1}'),
-        scheduled.durationUs,
-        clipIndex,
-      ));
     }
     return frames;
   } on ShowCompileException {
@@ -493,7 +541,8 @@ Future<List<CompiledFrame>> _compileNormalizedMotion(
 Future<List<CompiledFrame>> _compileNormalizedMotionCached(
   ShowClip clip,
   int clipIndex,
-  CompiledFrameCache cache, {
+  CompiledFrameCache cache,
+  FramePipeline engine, {
   void Function(int completed, int total)? onFrameProgress,
 }) async {
   final manifestPath = clip.normalizedPath;
@@ -515,6 +564,7 @@ Future<List<CompiledFrame>> _compileNormalizedMotionCached(
         clip,
         visualKey,
         cache,
+        engine,
       );
       completed++;
       onFrameProgress?.call(completed, uniquePaths.length);
@@ -538,6 +588,7 @@ Future<CompiledFrame> _compileNormalizedMotionEdgeCached(
   int clipIndex,
   bool first,
   CompiledFrameCache cache,
+  FramePipeline engine,
 ) async {
   final manifestPath = clip.normalizedPath;
   if (manifestPath == null || manifestPath.isEmpty) {
@@ -551,6 +602,7 @@ Future<CompiledFrame> _compileNormalizedMotionEdgeCached(
     clip,
     await _visualCacheKey(clip),
     cache,
+    engine,
   );
   return CompiledFrame(jpeg, scheduled.durationUs, clipIndex);
 }
@@ -560,6 +612,7 @@ Future<Uint8List> _compileNormalizedFrameCached(
   ShowClip clip,
   String visualKey,
   CompiledFrameCache cache,
+  FramePipeline engine,
 ) async {
   final sourceKey = CompiledFrameCache.digestText(
     await _fileFingerprint(framePath),
@@ -567,11 +620,16 @@ Future<Uint8List> _compileNormalizedFrameCached(
   final key = 'frame-$visualKey-$sourceKey';
   final cached = await cache.read(key);
   if (cached != null && cached.length == 1) return cached.single.jpeg;
-  final decoded = image.decodeJpg(await File(framePath).readAsBytes());
-  if (decoded == null) {
-    throw ShowCompileException('Не удалось прочитать кадр ${clip.name}');
+  final decoded = await engine.decodeImage(
+    await File(framePath).readAsBytes(),
+    clip.name,
+  );
+  Uint8List jpeg;
+  try {
+    jpeg = await engine.renderClipFrame(decoded, clip, clip.name);
+  } finally {
+    decoded.dispose();
   }
-  final jpeg = _encodeFrame(_renderFrame(decoded, clip), clip.name);
   await cache.write(
     key,
     [CachedFrameData(jpeg, 1)],
@@ -583,7 +641,8 @@ Future<Uint8List> _compileNormalizedFrameCached(
 Future<List<CompiledFrame>> _compileGifCached(
   ShowClip clip,
   int clipIndex,
-  CompiledFrameCache cache, {
+  CompiledFrameCache cache,
+  FramePipeline engine, {
   void Function(int completed, int total)? onFrameProgress,
 }) async {
   final bytes = await File(clip.assetPath).readAsBytes();
@@ -604,20 +663,32 @@ Future<List<CompiledFrame>> _compileGifCached(
     }
   }
   if (missing.isNotEmpty) {
-    final decoded = _decodeGif(bytes, clip);
-    for (final sourceIndex in missing) {
-      final jpeg = _encodeFrame(
-        _renderFrame(decoded.frames[sourceIndex], clip),
-        '${clip.name}, кадр ${sourceIndex + 1}',
-      );
-      encoded[sourceIndex] = jpeg;
-      await cache.write(
-        'frame-$visualKey-gif-$sourceIndex',
-        [CachedFrameData(jpeg, 1)],
-        maintain: false,
-      );
-      completed++;
-      onFrameProgress?.call(completed, sourceIndices.length);
+    missing.sort();
+    final animation = await engine.decodeAnimation(bytes, clip.name);
+    try {
+      for (final sourceIndex in missing) {
+        final source = await animation.frameAt(sourceIndex);
+        Uint8List jpeg;
+        try {
+          jpeg = await engine.renderClipFrame(
+            source,
+            clip,
+            '${clip.name}, кадр ${sourceIndex + 1}',
+          );
+        } finally {
+          source.dispose();
+        }
+        encoded[sourceIndex] = jpeg;
+        await cache.write(
+          'frame-$visualKey-gif-$sourceIndex',
+          [CachedFrameData(jpeg, 1)],
+          maintain: false,
+        );
+        completed++;
+        onFrameProgress?.call(completed, sourceIndices.length);
+      }
+    } finally {
+      animation.dispose();
     }
   }
   return schedule
@@ -634,6 +705,7 @@ Future<CompiledFrame> _compileGifEdgeCached(
   int clipIndex,
   bool first,
   CompiledFrameCache cache,
+  FramePipeline engine,
 ) async {
   final bytes = await File(clip.assetPath).readAsBytes();
   final schedule = _scheduleGifBytes(bytes, clip);
@@ -644,10 +716,11 @@ Future<CompiledFrame> _compileGifEdgeCached(
   if (cached != null && cached.length == 1) {
     return CompiledFrame(cached.single.jpeg, scheduled.durationUs, clipIndex);
   }
-  final decoded = _decodeGif(bytes, clip);
-  final jpeg = _encodeFrame(
-    _renderFrame(decoded.frames[scheduled.sourceIndex], clip),
-    '${clip.name}, кадр ${scheduled.sourceIndex + 1}',
+  final jpeg = await _renderGifFrame(
+    bytes,
+    clip,
+    scheduled.sourceIndex,
+    engine,
   );
   await cache.write(
     key,
@@ -657,70 +730,78 @@ Future<CompiledFrame> _compileGifEdgeCached(
   return CompiledFrame(jpeg, scheduled.durationUs, clipIndex);
 }
 
-List<CompiledFrame> _compileGif(
+Future<List<CompiledFrame>> _compileGif(
   Uint8List bytes,
   ShowClip clip,
   int clipIndex,
-) {
-  final decoded = _decodeGif(bytes, clip);
-  final schedule = _scheduleGif(decoded, clip);
+  FramePipeline engine,
+) async {
+  final schedule = _scheduleGifBytes(bytes, clip);
+  final needed = schedule.map((frame) => frame.sourceIndex).toSet().toList()
+    ..sort();
   final encoded = <int, Uint8List>{};
-  return schedule.map((scheduled) {
-    final jpeg = encoded.putIfAbsent(scheduled.sourceIndex, () {
-      final rendered = _renderFrame(
-        decoded.frames[scheduled.sourceIndex],
-        clip,
-      );
-      return _encodeFrame(
-        rendered,
-        '${clip.name}, кадр ${scheduled.sourceIndex + 1}',
-      );
-    });
-    return CompiledFrame(jpeg, scheduled.durationUs, clipIndex);
-  }).toList(growable: false);
-}
-
-image.Image _decodeGif(Uint8List bytes, ShowClip clip) {
-  final decoded = image.decodeGif(bytes);
-  if (decoded == null || decoded.frames.isEmpty) {
-    throw ShowCompileException(
-        'GIF ${clip.name} повреждён или не поддерживается');
+  final animation = await engine.decodeAnimation(bytes, clip.name);
+  try {
+    for (final sourceIndex in needed) {
+      final source = await animation.frameAt(sourceIndex);
+      try {
+        encoded[sourceIndex] = await engine.renderClipFrame(
+          source,
+          clip,
+          '${clip.name}, кадр ${sourceIndex + 1}',
+        );
+      } finally {
+        source.dispose();
+      }
+    }
+  } finally {
+    animation.dispose();
   }
-  return decoded;
+  return schedule
+      .map((scheduled) => CompiledFrame(
+            encoded[scheduled.sourceIndex]!,
+            scheduled.durationUs,
+            clipIndex,
+          ))
+      .toList(growable: false);
 }
 
-CompiledFrame _compileGifEdge(
+Future<CompiledFrame> _compileGifEdge(
   Uint8List bytes,
   ShowClip clip,
   int clipIndex,
   bool first,
-) {
-  final decoded = image.decodeGif(bytes);
-  if (decoded == null || decoded.frames.isEmpty) {
-    throw ShowCompileException(
-        'GIF ${clip.name} повреждён или не поддерживается');
-  }
-  final schedule = _scheduleGif(decoded, clip);
+  FramePipeline engine,
+) async {
+  final schedule = _scheduleGifBytes(bytes, clip);
   final scheduled = first ? schedule.first : schedule.last;
-  final rendered = _renderFrame(decoded.frames[scheduled.sourceIndex], clip);
   return CompiledFrame(
-    _encodeFrame(
-      rendered,
-      '${clip.name}, кадр ${scheduled.sourceIndex + 1}',
-    ),
+    await _renderGifFrame(bytes, clip, scheduled.sourceIndex, engine),
     scheduled.durationUs,
     clipIndex,
   );
 }
 
-List<ScheduledGifFrame> _scheduleGif(image.Image decoded, ShowClip clip) {
-  final rawDurations = decoded.frames
-      .map((frame) => frame.frameDuration <= 0 ? 100 : frame.frameDuration)
-      .toList(growable: false);
+Future<Uint8List> _renderGifFrame(
+  Uint8List bytes,
+  ShowClip clip,
+  int sourceIndex,
+  FramePipeline engine,
+) async {
+  final animation = await engine.decodeAnimation(bytes, clip.name);
   try {
-    return scheduleGifFrames(rawDurations, clip);
-  } on FormatException catch (error) {
-    throw ShowCompileException('${error.message}: ${clip.name}');
+    final source = await animation.frameAt(sourceIndex);
+    try {
+      return await engine.renderClipFrame(
+        source,
+        clip,
+        '${clip.name}, кадр ${sourceIndex + 1}',
+      );
+    } finally {
+      source.dispose();
+    }
+  } finally {
+    animation.dispose();
   }
 }
 
@@ -735,237 +816,59 @@ List<ScheduledGifFrame> _scheduleGifBytes(
   }
 }
 
-List<CompiledFrame> _compileTransition(
+Future<List<CompiledFrame>> _compileTransition(
   CompiledFrame outgoing,
   CompiledFrame incoming,
   ShowClip clip,
   int clipIndex,
-) {
+  FramePipeline engine,
+) async {
   if (clip.outgoingTransition == TransitionKind.none) return const [];
-  final from = image.decodeJpg(outgoing.jpeg);
-  final to = image.decodeJpg(incoming.jpeg);
-  if (from == null || to == null) {
+  final PipelineImage from;
+  final PipelineImage to;
+  try {
+    from = await engine.decodeImage(outgoing.jpeg, clip.name);
+  } catch (_) {
     throw ShowCompileException(
       'Не удалось подготовить переход после ${clip.name}',
     );
   }
-  final durationUs = clip.transitionDurationMs.clamp(200, 1500) * 1000;
-  final frameCount = math.max(1, (durationUs * 60 / 1000000).round());
-  final frameDuration = durationUs ~/ frameCount;
-  final remainder = durationUs % frameCount;
-  return List.generate(frameCount, (index) {
-    final progress = _ease((index + 1) / frameCount);
-    final rendered = _renderTransition(
-      from,
-      to,
-      clip.outgoingTransition,
-      progress,
+  try {
+    to = await engine.decodeImage(incoming.jpeg, clip.name);
+  } catch (_) {
+    from.dispose();
+    throw ShowCompileException(
+      'Не удалось подготовить переход после ${clip.name}',
     );
-    return CompiledFrame(
-      _encodeFrame(
-        rendered,
-        '${clip.name}, переход ${clip.outgoingTransition.label}',
-      ),
-      frameDuration + (index < remainder ? 1 : 0),
-      clipIndex,
-    );
-  }, growable: false);
-}
-
-image.Image _renderTransition(
-  image.Image from,
-  image.Image to,
-  TransitionKind kind,
-  double progress,
-) {
-  return switch (kind) {
-    TransitionKind.none => image.Image.from(to, noAnimation: true),
-    TransitionKind.dissolve => _blendTransition(from, to, progress),
-    TransitionKind.radialBloom => _radialTransition(from, to, progress),
-    TransitionKind.lightSweep => _sweepTransition(from, to, progress),
-    TransitionKind.depthFlow => _depthTransition(from, to, progress),
-  };
-}
-
-image.Image _blendTransition(
-  image.Image from,
-  image.Image to,
-  double amount,
-) {
-  final result = image.Image(width: _canvasSize, height: _canvasSize);
-  for (var y = 0; y < _canvasSize; y++) {
-    for (var x = 0; x < _canvasSize; x++) {
-      _setMixedPixel(
-          result, x, y, from.getPixel(x, y), to.getPixel(x, y), amount);
-    }
   }
-  return result;
-}
-
-image.Image _radialTransition(
-  image.Image from,
-  image.Image to,
-  double progress,
-) {
-  final result = image.Image(width: _canvasSize, height: _canvasSize);
-  const center = (_canvasSize - 1) / 2;
-  const maximumDistance = 565.0;
-  final radius = progress * 1.12;
-  const feather = 0.13;
-  for (var y = 0; y < _canvasSize; y++) {
-    final dy = y - center;
-    for (var x = 0; x < _canvasSize; x++) {
-      final dx = x - center;
-      final distance = math.sqrt(dx * dx + dy * dy) / maximumDistance;
-      final amount =
-          1 - _smoothStep(radius - feather, radius + feather, distance);
-      _setMixedPixel(
-          result, x, y, from.getPixel(x, y), to.getPixel(x, y), amount);
+  try {
+    final durationUs = clip.transitionDurationMs.clamp(200, 1500) * 1000;
+    final frameCount = math.max(1, (durationUs * 60 / 1000000).round());
+    final frameDuration = durationUs ~/ frameCount;
+    final remainder = durationUs % frameCount;
+    final frames = <CompiledFrame>[];
+    for (var index = 0; index < frameCount; index++) {
+      final progress = _ease((index + 1) / frameCount);
+      frames.add(CompiledFrame(
+        await engine.renderTransitionFrame(
+          from,
+          to,
+          clip.outgoingTransition,
+          progress,
+          '${clip.name}, переход ${clip.outgoingTransition.label}',
+        ),
+        frameDuration + (index < remainder ? 1 : 0),
+        clipIndex,
+      ));
     }
+    return frames;
+  } finally {
+    from.dispose();
+    to.dispose();
   }
-  return result;
-}
-
-image.Image _sweepTransition(
-  image.Image from,
-  image.Image to,
-  double progress,
-) {
-  final result = image.Image(width: _canvasSize, height: _canvasSize);
-  final edge = progress * 1.5 - 0.25;
-  const feather = 0.16;
-  for (var y = 0; y < _canvasSize; y++) {
-    for (var x = 0; x < _canvasSize; x++) {
-      final position = (x * 0.68 + y * 0.32) / (_canvasSize - 1);
-      final amount = 1 - _smoothStep(edge - feather, edge + feather, position);
-      final highlight = math.max(0.0, 1 - ((position - edge).abs() / 0.055));
-      _setMixedPixel(
-        result,
-        x,
-        y,
-        from.getPixel(x, y),
-        to.getPixel(x, y),
-        amount,
-        highlight: highlight * 0.12,
-      );
-    }
-  }
-  return result;
-}
-
-image.Image _depthTransition(
-  image.Image from,
-  image.Image to,
-  double progress,
-) {
-  final result = image.Image(width: _canvasSize, height: _canvasSize);
-  const center = (_canvasSize - 1) / 2;
-  final fromScale = 1 + progress * 0.1;
-  final toScale = 0.9 + progress * 0.1;
-  for (var y = 0; y < _canvasSize; y++) {
-    for (var x = 0; x < _canvasSize; x++) {
-      final fromX =
-          ((x - center) / fromScale + center).round().clamp(0, _canvasSize - 1);
-      final fromY =
-          ((y - center) / fromScale + center).round().clamp(0, _canvasSize - 1);
-      final toX =
-          ((x - center) / toScale + center).round().clamp(0, _canvasSize - 1);
-      final toY =
-          ((y - center) / toScale + center).round().clamp(0, _canvasSize - 1);
-      _setMixedPixel(
-        result,
-        x,
-        y,
-        from.getPixel(fromX, fromY),
-        to.getPixel(toX, toY),
-        progress,
-      );
-    }
-  }
-  return result;
-}
-
-void _setMixedPixel(
-  image.Image target,
-  int x,
-  int y,
-  image.Pixel from,
-  image.Pixel to,
-  double amount, {
-  double highlight = 0,
-}) {
-  final mix = amount.clamp(0.0, 1.0);
-  final glow = highlight.clamp(0.0, 1.0);
-  int channel(num a, num b) =>
-      (a + (b - a) * mix + 255 * glow).round().clamp(0, 255);
-  target.setPixelRgb(
-    x,
-    y,
-    channel(from.r, to.r),
-    channel(from.g, to.g),
-    channel(from.b, to.b),
-  );
 }
 
 double _ease(double value) => value * value * (3 - 2 * value);
-
-double _smoothStep(double edge0, double edge1, double value) {
-  final normalized = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-  return normalized * normalized * (3 - 2 * normalized);
-}
-
-image.Image _renderFrame(image.Image sourceFrame, ShowClip clip) {
-  final source = image.Image.from(sourceFrame, noAnimation: true);
-  final fitScale = clip.layout == ClipLayout.fit
-      ? math.min(_canvasSize / source.width, _canvasSize / source.height)
-      : math.max(_canvasSize / source.width, _canvasSize / source.height);
-  final scale = fitScale * clip.scale.clamp(0.1, 8);
-  final width = math.max(1, (source.width * scale).round());
-  final height = math.max(1, (source.height * scale).round());
-  final resized = image.copyResize(
-    source,
-    width: width,
-    height: height,
-    interpolation: image.Interpolation.linear,
-  );
-  final rotated = clip.rotation == 0
-      ? resized
-      : image.copyRotate(
-          resized,
-          angle: clip.rotation * 180 / math.pi,
-          interpolation: image.Interpolation.linear,
-        );
-  final canvas = image.Image(width: _canvasSize, height: _canvasSize);
-  image.fill(canvas, color: image.ColorRgb8(0, 0, 0));
-  image.compositeImage(
-    canvas,
-    rotated,
-    dstX: ((_canvasSize - rotated.width) / 2 + clip.offsetX).round(),
-    dstY: ((_canvasSize - rotated.height) / 2 + clip.offsetY).round(),
-  );
-  for (var y = 0; y < _canvasSize; y++) {
-    final bounds = _circleBounds[y];
-    for (var x = 0; x < bounds.left; x++) {
-      canvas.setPixelRgb(x, y, 0, 0, 0);
-    }
-    for (var x = bounds.right + 1; x < _canvasSize; x++) {
-      canvas.setPixelRgb(x, y, 0, 0, 0);
-    }
-  }
-  return canvas;
-}
-
-Uint8List _encodeFrame(image.Image frame, String label) {
-  for (final quality in const [88, 82, 76, 68, 60, 52, 44, 36]) {
-    final encoded = image.encodeJpg(
-      frame,
-      quality: quality,
-      chroma: image.JpegChroma.yuv420,
-    );
-    if (encoded.length <= _maxFrameBytes) return encoded;
-  }
-  throw ShowCompileException('$label слишком сложный для плавного вывода');
-}
 
 Uint8List _buildPackage(List<CompiledFrame> frames) {
   if (frames.isEmpty || frames.length > _maxFrames) {
@@ -1030,13 +933,28 @@ Uint8List _buildPackage(List<CompiledFrame> frames) {
       .takeBytes();
 }
 
+Uint32List? _crcTableCache;
+
+Uint32List _crcTable() {
+  final cached = _crcTableCache;
+  if (cached != null) return cached;
+  final table = Uint32List(256);
+  for (var index = 0; index < 256; index++) {
+    var value = index;
+    for (var bit = 0; bit < 8; bit++) {
+      value = (value & 1) != 0 ? (value >> 1) ^ 0xEDB88320 : value >> 1;
+    }
+    table[index] = value;
+  }
+  _crcTableCache = table;
+  return table;
+}
+
 int _crc32(Uint8List bytes) {
+  final table = _crcTable();
   var crc = 0xFFFFFFFF;
   for (final byte in bytes) {
-    crc ^= byte;
-    for (var bit = 0; bit < 8; bit++) {
-      crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320 : crc >> 1;
-    }
+    crc = (crc >> 8) ^ table[(crc ^ byte) & 0xFF];
   }
   return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
 }

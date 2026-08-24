@@ -25,6 +25,7 @@ void main() {
       ]),
     );
     expect(states.last.progress, 1);
+    expect(device.disconnectCalls, 1);
   });
 
   test('checksum rejection becomes a retryable failure', () async {
@@ -48,6 +49,7 @@ void main() {
     expect(states.last.message, contains('Контрольная сумма'));
     expect(states.last.message, contains('повторить'));
     expect(device.statusCalls, 0);
+    expect(device.disconnectCalls, 1);
   });
 
   test('transport timeout becomes a clear retryable failure', () async {
@@ -82,6 +84,7 @@ void main() {
     expect(await publisher.publish(bytes, onState: secondStates.add), isTrue);
     expect(device.connectCalls, 2);
     expect(device.uploadCalls, 2);
+    expect(device.disconnectCalls, 2);
     expect(secondStates.last.stage, PublishStage.complete);
   });
 }
@@ -94,6 +97,7 @@ class FakeShowDevice implements ShowDevice {
   int connectCalls = 0;
   int uploadCalls = 0;
   int statusCalls = 0;
+  int disconnectCalls = 0;
 
   @override
   Future<void> clearMedia() async {}
@@ -101,6 +105,11 @@ class FakeShowDevice implements ShowDevice {
   @override
   Future<void> connect() async {
     connectCalls++;
+  }
+
+  @override
+  Future<void> disconnect() async {
+    disconnectCalls++;
   }
 
   @override

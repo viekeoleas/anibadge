@@ -22,13 +22,25 @@ uint32_t read_u32(const uint8_t *data) {
          (static_cast<uint32_t>(data[3]) << 24);
 }
 
-uint32_t crc32_update(uint32_t state, const uint8_t *data, size_t size) {
-  for (size_t index = 0; index < size; ++index) {
-    state ^= data[index];
-    for (uint8_t bit = 0; bit < 8; ++bit) {
-      state = (state >> 1) ^
-              ((state & 1U) != 0 ? 0xEDB88320U : 0U);
+const uint32_t *crc32_table() {
+  static const uint32_t *table = [] {
+    static uint32_t entries[256];
+    for (uint32_t index = 0; index < 256; ++index) {
+      uint32_t value = index;
+      for (uint8_t bit = 0; bit < 8; ++bit) {
+        value = (value >> 1) ^ ((value & 1U) != 0 ? 0xEDB88320U : 0U);
+      }
+      entries[index] = value;
     }
+    return entries;
+  }();
+  return table;
+}
+
+uint32_t crc32_update(uint32_t state, const uint8_t *data, size_t size) {
+  const uint32_t *table = crc32_table();
+  for (size_t index = 0; index < size; ++index) {
+    state = (state >> 8) ^ table[(state ^ data[index]) & 0xFFU];
   }
   return state;
 }

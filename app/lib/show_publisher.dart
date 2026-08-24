@@ -41,6 +41,8 @@ class ShowDeviceStatus {
 abstract interface class ShowDevice {
   Future<void> connect();
 
+  Future<void> disconnect();
+
   Future<void> clearMedia();
 
   Future<void> upload(
@@ -70,7 +72,7 @@ class ShowPublisher {
     try {
       onState(const PublishState(
         PublishStage.connecting,
-        'Подключение к Wi-Fi платы…',
+        'Ищем значок по Bluetooth и включаем временный Wi-Fi…',
       ));
       await device.connect();
 
@@ -129,6 +131,10 @@ class ShowPublisher {
         '$message. Можно повторить публикацию.',
       ));
       return false;
+    } finally {
+      try {
+        await device.disconnect();
+      } catch (_) {}
     }
   }
 }

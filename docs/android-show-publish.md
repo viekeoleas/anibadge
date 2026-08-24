@@ -1,12 +1,14 @@
 # Android ZSHOW publish flow
 
-The Flutter application publishes an already compiled `.zshow` package to the
-Waveshare 31523 over the board's `Znachok-BMW` Wi-Fi network.
+The Flutter application discovers the Waveshare 31523 over BLE, requests a
+temporary Wi-Fi session, and publishes an already compiled `.zshow` package.
+The board does not keep an access point running between operations.
 
 ## User-visible stages
 
-1. **Подключение** — Android binds to the board Wi-Fi and checks that the
-   firmware is reachable.
+1. **Подключение** — Android discovers the BLE service, requests a versioned
+   publish session, binds to the returned temporary Wi-Fi network, and checks
+   that the firmware is reachable.
 2. **Передача** — the package is streamed as a multipart POST; both displays
    show determinate progress. The board redraws only at two-percent increments.
 3. **Проверка** — after the request body is sent, the board checks the ZSHOW
@@ -15,10 +17,12 @@ Waveshare 31523 over the board's `Znachok-BMW` Wi-Fi network.
 4. **Установка** — a validated temporary file atomically replaces the current
    show. The app polls the player status instead of treating HTTP 200 as proof
    of playback.
-5. **Готово** — the board reports `playing`.
+5. **Готово** — the board reports `playing`; Android releases the BLE session,
+   unbinds the temporary network, and the board disables Wi-Fi.
 
 The selected file is retained in memory after a failure, so the same publish
-can be retried without reopening the picker.
+can be retried without reopening the picker. A failed or abandoned session
+expires on the board after 180 seconds and leaves BLE advertising available.
 
 ## HTTP boundary
 
@@ -94,6 +98,6 @@ registrant. The verification script rejects an APK where required Android
 plugins are missing or removed by R8.
 
 The installable arm64 release artifact is
-`artifacts/Znachok-Editor-v3.7.0-arm64-release.apk`. It is an optimized release
+`artifacts/Znachok-Editor-v3.9.0-arm64-release.apk`. It is an optimized release
 build signed with the current development key; production signing remains a
 release-engineering task.

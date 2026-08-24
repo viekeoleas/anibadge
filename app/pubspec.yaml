@@ -1,7 +1,7 @@
 name: znachok_bmw
 description: Local show editor and publisher for the Znachok ESP32-P4 display.
 publish_to: 'none'
-version: 3.7.0+31
+version: 3.9.0+33
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -9,6 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_blue_plus: ^1.36.8
   file_picker: ^10.3.7
   permission_handler: ^11.3.1
   image: ^4.9.2

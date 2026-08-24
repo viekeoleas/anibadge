@@ -74,10 +74,13 @@ environment.
 ## Upload and boot behavior
 
 The firmware accepts a multipart POST at
-`/show/upload?name=current.zshow&size=<exact-byte-count>`. It streams into a
-temporary LittleFS file, loads and validates the completed package, and only
-then atomically replaces `/media/current.zshow`. A rejected or interrupted
-upload leaves the previous show intact.
+`/show/upload?name=current.zshow&size=<exact-byte-count>`. When PSRAM has room
+(the player is stopped during upload, so it normally does) the package streams
+directly into a PSRAM buffer, is validated in RAM, and only then is written to
+`/media/current.zshow` in one sequential pass and handed to the player without
+a read-back. Without PSRAM headroom the firmware falls back to streaming into
+a temporary LittleFS file and validating the completed file. In both modes a
+rejected or interrupted upload leaves the previous show intact.
 
 On boot, the runtime tries the installed ZSHOW first, then the legacy GIF. A
 valid ZSHOW starts automatically and loops forever. If no playable package

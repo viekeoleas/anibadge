@@ -3,9 +3,9 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
-import 'package:image/image.dart' as image;
 import 'package:path/path.dart' as path;
 
+import 'jpeg_frame_encoder.dart';
 import 'project_model.dart';
 
 const int generatedCanvasSize = 800;
@@ -196,17 +196,13 @@ Future<void> _writePicture(
   if (bytes == null) throw StateError('Не удалось создать кадр');
   final encoded = png
       ? bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes)
-      : image.encodeJpg(
-          image.Image.fromBytes(
-            width: generatedCanvasSize,
-            height: generatedCanvasSize,
-            bytes: bytes.buffer,
-            bytesOffset: bytes.offsetInBytes,
-            order: image.ChannelOrder.rgba,
-          ),
-          quality: 88,
-          chroma: image.JpegChroma.yuv420,
+      : await encodeRgbaJpegUnderBudget(
+          rgba: bytes.buffer
+              .asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+          width: generatedCanvasSize,
+          height: generatedCanvasSize,
         );
+  if (encoded == null) throw StateError('Кадр не уложился в лимит значка');
   final output = File(outputPath);
   await output.parent.create(recursive: true);
   await output.writeAsBytes(encoded, flush: true);

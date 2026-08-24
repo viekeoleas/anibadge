@@ -682,7 +682,7 @@ class _TransitionJoinPreviewState extends State<TransitionJoinPreview> {
   }
 
   void _compile() {
-    _preview = compileTransitionPreviewInBackground(
+    _preview = compileTransitionPreviewFast(
       widget.outgoing,
       widget.incoming,
       cacheDirectory: widget.cacheDirectory,

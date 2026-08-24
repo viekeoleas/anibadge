@@ -66,6 +66,7 @@ void main() {
 
     expect(device.connectCalls, 1);
     expect(device.clearCalls, 1);
+    expect(device.disconnectCalls, 1);
     expect(find.textContaining('Память значка очищена'), findsOneWidget);
   });
 }
@@ -73,6 +74,7 @@ void main() {
 class _ClearableDevice implements ShowDevice {
   int connectCalls = 0;
   int clearCalls = 0;
+  int disconnectCalls = 0;
 
   @override
   Future<void> clearMedia() async {
@@ -82,6 +84,11 @@ class _ClearableDevice implements ShowDevice {
   @override
   Future<void> connect() async {
     connectCalls++;
+  }
+
+  @override
+  Future<void> disconnect() async {
+    disconnectCalls++;
   }
 
   @override

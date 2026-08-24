@@ -877,6 +877,9 @@ class _CaptureDevice implements ShowDevice {
   Future<void> connect() async {}
 
   @override
+  Future<void> disconnect() async {}
+
+  @override
   Future<void> upload(
     Uint8List bytes, {
     required void Function(double progress) onProgress,

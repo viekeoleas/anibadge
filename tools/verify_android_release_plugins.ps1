@@ -13,6 +13,7 @@ if (-not (Test-Path -LiteralPath $registrantPath)) {
 
 $requiredPlugins = @(
     'com.mr.flutter.plugin.filepicker.FilePickerPlugin',
+    'com.lib.flutter_blue_plus.FlutterBluePlusPlugin',
     'com.baseflow.permissionhandler.PermissionHandlerPlugin',
     'com.github.dart_lang.jni.JniPlugin',
     'com.github.dart_lang.jni_flutter.JniFlutterPlugin'

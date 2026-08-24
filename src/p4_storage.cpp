@@ -26,6 +26,49 @@ size_t upload_received = 0;
 UploadType upload_type = UploadType::kNone;
 const char *show_upload_error = "none";
 
+// Show uploads stream into PSRAM when it is available: the package is
+// validated in RAM (no LittleFS read-back) and persisted afterwards in one
+// sequential pass. The validated buffer is then handed to the player so the
+// fresh package is not read back from flash either.
+uint8_t *show_upload_buffer = nullptr;
+uint8_t *installed_show_data = nullptr;
+size_t installed_show_size = 0;
+constexpr size_t kPersistChunkBytes = 256U * 1024U;
+
+void release_show_upload_buffer() {
+  if (show_upload_buffer != nullptr) {
+    heap_caps_free(show_upload_buffer);
+    show_upload_buffer = nullptr;
+  }
+}
+
+void release_installed_show_handoff() {
+  if (installed_show_data != nullptr) {
+    heap_caps_free(installed_show_data);
+    installed_show_data = nullptr;
+  }
+  installed_show_size = 0;
+}
+
+bool persist_show_buffer(const uint8_t *data, size_t size) {
+  LittleFS.remove(kShowUploadTemp);
+  File out = LittleFS.open(kShowUploadTemp, FILE_WRITE);
+  if (!out) return false;
+  size_t written = 0;
+  while (written < size) {
+    const size_t chunk =
+        size - written < kPersistChunkBytes ? size - written : kPersistChunkBytes;
+    if (out.write(data + written, chunk) != chunk) {
+      out.close();
+      LittleFS.remove(kShowUploadTemp);
+      return false;
+    }
+    written += chunk;
+  }
+  out.close();
+  return true;
+}
+
 portMUX_TYPE request_mux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool request_pending = false;
 volatile bool show_request_pending = false;
@@ -149,6 +192,14 @@ uint8_t *load_gif(const char *name, size_t *size_out) {
 }
 
 uint8_t *load_show(size_t *size_out) {
+  if (installed_show_data != nullptr) {
+    uint8_t *data = installed_show_data;
+    const size_t size = installed_show_size;
+    installed_show_data = nullptr;
+    installed_show_size = 0;
+    if (size_out != nullptr) *size_out = size;
+    return data;
+  }
   return load_file(kCurrentShowPath, p4show::kMaxPackageBytes, size_out);
 }
 
@@ -183,10 +234,16 @@ bool begin_stream_upload(const char *name, size_t expected_size) {
 }
 
 bool write_stream_upload(const uint8_t *data, size_t size) {
-  if (!upload_file || data == nullptr || size == 0 ||
+  if (data == nullptr || size == 0 ||
       upload_received + size > upload_expected) {
     return false;
   }
+  if (upload_type == UploadType::kShow && show_upload_buffer != nullptr) {
+    memcpy(show_upload_buffer + upload_received, data, size);
+    upload_received += size;
+    return true;
+  }
+  if (!upload_file) return false;
   const size_t written = upload_file.write(data, size);
   upload_received += written;
   return written == size;
@@ -212,6 +269,7 @@ bool finish_stream_upload() {
 
 void abort_stream_upload() {
   if (upload_file) upload_file.close();
+  release_show_upload_buffer();
   LittleFS.remove(kUploadTemp);
   LittleFS.remove(kShowUploadTemp);
   upload_expected = 0;
@@ -221,6 +279,7 @@ void abort_stream_upload() {
 
 bool clear_media() {
   abort_stream_upload();
+  release_installed_show_handoff();
   bool ok = true;
   size_t removed_bytes = 0;
   File dir = LittleFS.open(kMediaDir);
@@ -266,10 +325,16 @@ bool begin_show_stream_upload(const char *name, size_t expected_size) {
     show_upload_error = "storage-full";
     return false;
   }
-  upload_file = LittleFS.open(kShowUploadTemp, FILE_WRITE);
-  if (!upload_file) {
-    show_upload_error = "storage-open";
-    return false;
+  show_upload_buffer = static_cast<uint8_t *>(heap_caps_malloc(
+      expected_size,
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_CACHE_ALIGNED));
+  if (show_upload_buffer == nullptr) {
+    // Without PSRAM headroom fall back to streaming into the temp file.
+    upload_file = LittleFS.open(kShowUploadTemp, FILE_WRITE);
+    if (!upload_file) {
+      show_upload_error = "storage-open";
+      return false;
+    }
   }
   upload_type = UploadType::kShow;
   upload_expected = expected_size;
@@ -278,46 +343,79 @@ bool begin_show_stream_upload(const char *name, size_t expected_size) {
 }
 
 bool finish_show_stream_upload() {
-  if (!upload_file || upload_type != UploadType::kShow) {
+  if (upload_type != UploadType::kShow ||
+      (!upload_file && show_upload_buffer == nullptr)) {
     show_upload_error = "upload-state";
     return false;
   }
-  upload_file.close();
+  if (upload_file) upload_file.close();
   bool installed = false;
+  bool handoff_ready = false;
   p4show::Error validation = p4show::Error::kPackageSize;
+  uint32_t validate_ms = 0;
+  uint32_t persist_ms = 0;
   if (upload_received == upload_expected) {
-    size_t package_size = 0;
-    uint8_t *package_data =
-        load_file(kShowUploadTemp, p4show::kMaxPackageBytes, &package_size);
+    uint8_t *package_data = show_upload_buffer;
+    size_t package_size = upload_received;
+    if (package_data == nullptr) {
+      package_data =
+          load_file(kShowUploadTemp, p4show::kMaxPackageBytes, &package_size);
+    }
     if (package_data != nullptr) {
+      const uint32_t validate_start = millis();
       validation = p4show::validate(package_data, package_size);
-      heap_caps_free(package_data);
+      validate_ms = millis() - validate_start;
     }
     if (validation == p4show::Error::kOk) {
-      LittleFS.remove(kShowBackup);
-      const bool had_current = LittleFS.exists(kCurrentShowPath);
-      const bool backed_up =
-          !had_current || LittleFS.rename(kCurrentShowPath, kShowBackup);
-      installed = backed_up &&
-                  LittleFS.rename(kShowUploadTemp, kCurrentShowPath);
-      if (installed) {
-        LittleFS.remove(kShowBackup);
-      } else if (had_current && LittleFS.exists(kShowBackup)) {
-        LittleFS.rename(kShowBackup, kCurrentShowPath);
+      const uint32_t persist_start = millis();
+      bool persisted = true;
+      if (show_upload_buffer != nullptr) {
+        persisted = persist_show_buffer(package_data, package_size);
       }
+      if (persisted) {
+        LittleFS.remove(kShowBackup);
+        const bool had_current = LittleFS.exists(kCurrentShowPath);
+        const bool backed_up =
+            !had_current || LittleFS.rename(kCurrentShowPath, kShowBackup);
+        installed = backed_up &&
+                    LittleFS.rename(kShowUploadTemp, kCurrentShowPath);
+        if (installed) {
+          LittleFS.remove(kShowBackup);
+        } else if (had_current && LittleFS.exists(kShowBackup)) {
+          LittleFS.rename(kShowBackup, kCurrentShowPath);
+        }
+      }
+      persist_ms = millis() - persist_start;
+    }
+    if (installed && package_data != nullptr) {
+      // The validated PSRAM copy becomes the player's package: playback does
+      // not need to read the file it just wrote.
+      release_installed_show_handoff();
+      installed_show_data = package_data;
+      installed_show_size = package_size;
+      if (package_data == show_upload_buffer) show_upload_buffer = nullptr;
+      handoff_ready = true;
+    }
+    if (package_data != nullptr && package_data != installed_show_data &&
+        package_data != show_upload_buffer) {
+      heap_caps_free(package_data);
     }
   }
+  release_show_upload_buffer();
   if (!installed) LittleFS.remove(kShowUploadTemp);
   show_upload_error = installed
                           ? "none"
                           : validation == p4show::Error::kOk
                                 ? "install-failed"
                                 : p4show::error_name(validation);
-  Serial.printf("SHOW UPLOAD: %u/%u bytes, validation=%s, %s\n",
-                static_cast<unsigned>(upload_received),
-                static_cast<unsigned>(upload_expected),
-                p4show::error_name(validation),
-                installed ? "installed" : "rejected");
+  Serial.printf(
+      "SHOW UPLOAD: %u/%u bytes, validation=%s, %s, validate %u ms, "
+      "persist %u ms, %s\n",
+      static_cast<unsigned>(upload_received),
+      static_cast<unsigned>(upload_expected), p4show::error_name(validation),
+      installed ? "installed" : "rejected", static_cast<unsigned>(validate_ms),
+      static_cast<unsigned>(persist_ms),
+      handoff_ready ? "ram-handoff" : "file-path");
   upload_expected = 0;
   upload_received = 0;
   upload_type = UploadType::kNone;

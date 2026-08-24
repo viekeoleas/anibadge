@@ -659,7 +659,7 @@ class _HomePageState extends State<HomePage> {
       _status = 'Подготавливаем изменённые кадры для значка…';
     });
     try {
-      final compiled = await compileProjectInBackground(
+      final compiled = await compileProjectFast(
         _project,
         cacheDirectory: _store?.compilerCacheDirectory.path,
         onProgress: (progress) {
@@ -770,6 +770,10 @@ class _HomePageState extends State<HomePage> {
         _clearing = false;
         _status = 'Не удалось очистить память: $error';
       });
+    } finally {
+      try {
+        await _device.disconnect();
+      } catch (_) {}
     }
   }
 

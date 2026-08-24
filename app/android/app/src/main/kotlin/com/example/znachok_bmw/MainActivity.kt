@@ -1,16 +1,23 @@
 package com.example.znachok_bmw
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMethodCodec
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
     private val channelName = "znachok/wifi"
@@ -18,6 +25,10 @@ class MainActivity : FlutterActivity() {
     private var connectivity: ConnectivityManager? = null
     private var wifiCallback: ConnectivityManager.NetworkCallback? = null
     private var boundNetwork: Network? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val encoderPool: ExecutorService = Executors.newFixedThreadPool(
+        Runtime.getRuntime().availableProcessors().coerceIn(2, 4),
+    )
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -56,9 +67,68 @@ class MainActivity : FlutterActivity() {
                             normalizeMp4(sourcePath, outputDirectory, result)
                         }
                     }
+                    "encodeJpeg" -> {
+                        val rgba = call.argument<ByteArray>("rgba")
+                        val width = call.argument<Int>("width") ?: 0
+                        val height = call.argument<Int>("height") ?: 0
+                        val maxBytes = call.argument<Int>("maxBytes") ?: Int.MAX_VALUE
+                        val qualities = call.argument<List<Int>>("qualities")
+                        if (rgba == null || width <= 0 || height <= 0 ||
+                            qualities.isNullOrEmpty() || rgba.size < width * height * 4
+                        ) {
+                            result.error("BAD_ARGUMENT", "Некорректный RGBA-кадр", null)
+                        } else {
+                            encodeJpeg(rgba, width, height, maxBytes, qualities, result)
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun encodeJpeg(
+        rgba: ByteArray,
+        width: Int,
+        height: Int,
+        maxBytes: Int,
+        qualities: List<Int>,
+        result: MethodChannel.Result,
+    ) {
+        encoderPool.execute {
+            try {
+                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(rgba))
+                var encoded: ByteArray? = null
+                for (quality in qualities) {
+                    val stream = ByteArrayOutputStream(256 * 1024)
+                    if (!bitmap.compress(
+                            Bitmap.CompressFormat.JPEG,
+                            quality.coerceIn(1, 100),
+                            stream,
+                        )
+                    ) {
+                        continue
+                    }
+                    val bytes = stream.toByteArray()
+                    if (bytes.size <= maxBytes) {
+                        encoded = bytes
+                        break
+                    }
+                }
+                bitmap.recycle()
+                mainHandler.post {
+                    if (encoded != null) {
+                        result.success(encoded)
+                    } else {
+                        result.error("TOO_COMPLEX", "Кадр не уложился в лимит", null)
+                    }
+                }
+            } catch (error: Exception) {
+                mainHandler.post {
+                    result.error("ENCODE_FAILED", error.message, null)
+                }
+            }
+        }
     }
 
     private fun normalizeMp4(
@@ -155,6 +225,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         releaseBoardNetwork()
+        encoderPool.shutdown()
         super.onDestroy()
     }
 }

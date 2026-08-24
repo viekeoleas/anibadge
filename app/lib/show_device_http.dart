@@ -5,19 +5,22 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'ble_publish_session.dart';
 import 'show_publisher.dart';
 
-const String _host = '192.168.4.1';
-const String _ssid = 'Znachok-BMW';
-const String _password = 'bmw-display';
 const MethodChannel _wifi = MethodChannel('znachok/wifi');
 
 class HttpShowDevice implements ShowDevice {
   HttpShowDevice({
     this.responseTimeout = const Duration(minutes: 5),
-  });
+    PublishSessionBroker? sessionBroker,
+  }) : _sessionBroker = sessionBroker ?? BlePublishSessionBroker();
 
   final Duration responseTimeout;
+  final PublishSessionBroker _sessionBroker;
+  PublishSession? _session;
+
+  String get _host => _session?.host ?? '192.168.4.1';
 
   Future<bool> _healthOk() async {
     final client = HttpClient()
@@ -38,35 +41,51 @@ class HttpShowDevice implements ShowDevice {
 
   @override
   Future<void> connect() async {
-    if (await _healthOk()) return;
-    await Future<void>.delayed(const Duration(milliseconds: 250));
-    if (await _healthOk()) return;
     if (!Platform.isAndroid) {
       throw const ShowPublishException(
-        'Подключитесь к Wi-Fi Znachok-BMW, пароль bmw-display',
+        'BLE-публикация пока поддерживается только на Android',
       );
     }
+    if (_session != null && await _healthOk()) return;
+    try {
+      final session = await _sessionBroker.open();
+      _session = session;
+      final nearby = await Permission.nearbyWifiDevices.request();
+      final location = await Permission.locationWhenInUse.request();
+      if (!nearby.isGranted && !location.isGranted) {
+        throw const ShowPublishException(
+          'Разрешите приложению подключаться к временному Wi-Fi значка',
+        );
+      }
+      await _wifi.invokeMethod<bool>('connect', {
+        'ssid': session.ssid,
+        'password': session.password,
+      }).timeout(const Duration(seconds: 50));
 
-    final nearby = await Permission.nearbyWifiDevices.request();
-    final location = await Permission.locationWhenInUse.request();
-    if (!nearby.isGranted && !location.isGranted) {
+      for (var attempt = 0; attempt < 15; attempt++) {
+        if (await _healthOk()) return;
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      }
       throw const ShowPublishException(
-        'Разрешите приложению подключаться к ближайшим Wi-Fi сетям',
+        'Wi-Fi подключён, но плата не отвечает',
       );
+    } catch (_) {
+      await disconnect();
+      rethrow;
     }
-    await _wifi.invokeMethod<bool>('connect', {
-      'ssid': _ssid,
-      'password': _password,
-    }).timeout(const Duration(seconds: 50));
+  }
 
-    for (var attempt = 0; attempt < 15; attempt++) {
-      if (await _healthOk()) return;
-      await Future<void>.delayed(const Duration(milliseconds: 400));
+  @override
+  Future<void> disconnect() async {
+    try {
+      if (Platform.isAndroid) {
+        await _wifi.invokeMethod<bool>('disconnect');
+      }
+    } catch (_) {
+    } finally {
+      await _sessionBroker.close();
+      _session = null;
     }
-    await _wifi.invokeMethod<bool>('disconnect');
-    throw const ShowPublishException(
-      'Wi-Fi подключён, но плата не отвечает',
-    );
   }
 
   @override
