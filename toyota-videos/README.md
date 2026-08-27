@@ -52,7 +52,11 @@ does not use it.
 
 ## BMW 10-second loops
 
-Three silent, seamless 800x800 compositions run for 10 seconds at 30 FPS:
+Four silent, seamless 800x800 compositions run for 10 seconds at 30 FPS:
+
+- `BmwPremiumMorphP4` - an edge-to-edge BMW roundel unfolds into four
+  sculptural planes, a restrained car front, a silver-blue road ribbon, and
+  reassembles into the original mark without captions or interface graphics;
 
 - `BmwJoyShiftP4` - a full-frame BMW roundel becomes an expressive face,
   looks around, enters a speed portal, and resolves through a kinetic JOY mark;
@@ -62,6 +66,7 @@ Three silent, seamless 800x800 compositions run for 10 seconds at 30 FPS:
   and horizon radar.
 
 ```powershell
+npm run render:bmw-premium
 npm run render:bmw-joy
 npm run render:bmw-m
 npm run render:bmw-orbit

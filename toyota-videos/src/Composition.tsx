@@ -16,6 +16,8 @@ import {ToyotaCelicaLaserResurrection} from "./ToyotaCelicaLaser";
 import {ToyotaPortalEngine} from "./ToyotaPortalEngine";
 import {ToyotaPerspectiveTemple} from "./ToyotaPerspectiveTemple";
 import {BmwJoyShift, BmwMVelocity, BmwOrbit} from "./BmwShowcase";
+import {BmwPremiumMorph} from "./BmwPremiumMorph";
+import {ToyotaWheelMorph} from "./ToyotaWheelMorph";
 
 export const CANVAS_SIZE = 800;
 export const FPS = 30;
@@ -607,6 +609,22 @@ export const ToyotaCompositions: React.FC = () => {
       <Composition
         id="ToyotaPerspectiveTempleP4"
         component={ToyotaPerspectiveTemple}
+        durationInFrames={FPS * 10}
+        fps={FPS}
+        width={CANVAS_SIZE}
+        height={CANVAS_SIZE}
+      />
+      <Composition
+        id="BmwPremiumMorphP4"
+        component={BmwPremiumMorph}
+        durationInFrames={FPS * 10}
+        fps={FPS}
+        width={CANVAS_SIZE}
+        height={CANVAS_SIZE}
+      />
+      <Composition
+        id="ToyotaWheelMorphP4"
+        component={ToyotaWheelMorph}
         durationInFrames={FPS * 10}
         fps={FPS}
         width={CANVAS_SIZE}

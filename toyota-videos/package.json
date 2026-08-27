@@ -34,6 +34,8 @@
     "render:bmw-joy": "remotion render BmwJoyShiftP4 out/bmw-joy-shift-p4.mp4 --codec=h264 --crf=18 --muted",
     "render:bmw-m": "remotion render BmwMVelocityP4 out/bmw-m-velocity-p4.mp4 --codec=h264 --crf=18 --muted",
     "render:bmw-orbit": "remotion render BmwOrbitP4 out/bmw-orbit-p4.mp4 --codec=h264 --crf=18 --muted",
+    "render:bmw-premium": "remotion render BmwPremiumMorphP4 out/bmw-premium-morph-p4.mp4 --codec=h264 --crf=18 --muted",
+    "render:toyota-wheel-morph": "remotion render ToyotaWheelMorphP4 out/toyota-wheel-morph-p4.mp4 --codec=h264 --crf=18 --muted",
     "render:bmw": "npm run render:bmw-joy && npm run render:bmw-m && npm run render:bmw-orbit",
     "upgrade": "remotion upgrade",
     "lint": "eslint src && tsc"
