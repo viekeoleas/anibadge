@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-const int maxShowBytes = 20 * 1024 * 1024;
+const int maxShowBytes = 23 * 1024 * 1024;
 
 class ShowPackageInfo {
   const ShowPackageInfo({
@@ -28,7 +28,7 @@ ShowPackageInfo inspectShowPackage(Uint8List bytes) {
     throw const ShowPackageException('Файл обрезан: заголовок ZSHOW неполный');
   }
   if (bytes.length > maxShowBytes) {
-    throw const ShowPackageException('ZSHOW должен быть не больше 20 МБ');
+    throw const ShowPackageException('ZSHOW должен быть не больше 23 МБ');
   }
 
   const magic = <int>[0x5A, 0x53, 0x48, 0x4F, 0x57, 0x56, 0x31, 0x00];

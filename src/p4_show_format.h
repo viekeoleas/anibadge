@@ -12,7 +12,7 @@ constexpr uint32_t kCodecBaselineJpeg = 1;
 constexpr uint16_t kLoopFlag = 1;
 constexpr size_t kHeaderBytes = 64;
 constexpr size_t kFrameEntryBytes = 16;
-constexpr size_t kMaxPackageBytes = 20U * 1024U * 1024U;
+constexpr size_t kMaxPackageBytes = 23U * 1024U * 1024U;
 constexpr size_t kMaxJpegBytes = 212U * 1024U;
 constexpr uint32_t kMaxFrames = 20000;
 

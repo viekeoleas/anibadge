@@ -14,9 +14,9 @@ The board does not keep an access point running between operations.
 3. **Проверка** — after the request body is sent, the board checks the ZSHOW
    structure, compatibility, frame metadata, JPEG headers, and both CRC32
    values.
-4. **Установка** — a validated temporary file atomically replaces the current
-   show. The app polls the player status instead of treating HTTP 200 as proof
-   of playback.
+4. **Установка** — the validated PSRAM package is written sequentially to the
+   dedicated raw-flash partition and committed. The app polls the player status
+   instead of treating HTTP 200 as proof of playback.
 5. **Готово** — the board reports `playing`; Android releases the BLE session,
    unbinds the temporary network, and the board disables Wi-Fi.
 
@@ -55,8 +55,9 @@ Example response:
 {"state":"playing","installed":true}
 ```
 
-Only `playing` completes publication. An interrupted upload is discarded and
-the previous package remains available.
+Only `playing` completes publication. The previous package is removed when a
+replacement upload starts. An interrupted upload is discarded, leaves the
+built-in fallback active, and can be retried.
 
 Media cleanup:
 
@@ -70,9 +71,10 @@ Successful response:
 {"ok":true,"installed":false}
 ```
 
-This stops playback and removes only uploaded files under the board's `/media`
-directory. Firmware, persistent settings, and projects stored on the phone are
-not removed. The board returns to its built-in startup screen after cleanup.
+This stops playback, invalidates the raw show partition, and removes uploaded
+legacy GIF files under the board's `/media` directory. Firmware, persistent
+settings, and projects stored on the phone are not removed. The board returns
+to its built-in startup screen after cleanup.
 
 ## Verification
 

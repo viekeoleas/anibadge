@@ -68,9 +68,14 @@ void receive_upload(UploadKind kind) {
                           server.arg("name").c_str(), upload_expected)
                     : p4storage::begin_stream_upload(
                           server.arg("name").c_str(), upload_expected);
-    Serial.printf("HTTP %s: begin %u bytes\n",
+    Serial.printf("HTTP %s: begin %u bytes, %s%s%s\n",
                   kind == UploadKind::kShow ? "SHOW" : "GIF",
-                  static_cast<unsigned>(upload_expected));
+                  static_cast<unsigned>(upload_expected),
+                  upload_ok ? "accepted" : "rejected",
+                  !upload_ok && kind == UploadKind::kShow ? ", error=" : "",
+                  !upload_ok && kind == UploadKind::kShow
+                      ? p4storage::last_show_upload_error()
+                      : "");
     if (upload_ok) {
       update_upload_progress();
     } else {

@@ -4,6 +4,7 @@
 #include <LittleFS.h>
 
 #include "esp_heap_caps.h"
+#include "esp_partition.h"
 
 #include "p4_gif.h"
 #include "p4_show_format.h"
@@ -14,9 +15,19 @@ namespace {
 constexpr char kMediaDir[] = "/media";
 constexpr char kCurrentPath[] = "/media/current.gif";
 constexpr char kUploadTemp[] = "/media/.upload.tmp";
-constexpr char kCurrentShowPath[] = "/media/current.zshow";
-constexpr char kShowUploadTemp[] = "/media/.show-upload.tmp";
-constexpr char kShowBackup[] = "/media/.show-backup.tmp";
+constexpr char kRawShowPartitionLabel[] = "show";
+constexpr size_t kRawShowDataOffset = 4096U;
+constexpr size_t kRawEraseChunkBytes = 64U * 1024U;
+constexpr size_t kRawWriteChunkBytes = 256U * 1024U;
+constexpr uint8_t kRawShowMagic[8] = {'Z', 'S', 'R', 'A', 'W', 'V', '1', 0};
+
+struct RawShowHeader {
+  uint8_t magic[8];
+  uint32_t size;
+  uint32_t reserved;
+};
+
+static_assert(sizeof(RawShowHeader) == 16, "Unexpected raw show header size");
 
 enum class UploadType : uint8_t { kNone, kGif, kShow };
 
@@ -25,15 +36,14 @@ size_t upload_expected = 0;
 size_t upload_received = 0;
 UploadType upload_type = UploadType::kNone;
 const char *show_upload_error = "none";
-
-// Show uploads stream into PSRAM when it is available: the package is
-// validated in RAM (no LittleFS read-back) and persisted afterwards in one
-// sequential pass. The validated buffer is then handed to the player so the
-// fresh package is not read back from flash either.
 uint8_t *show_upload_buffer = nullptr;
 uint8_t *installed_show_data = nullptr;
 size_t installed_show_size = 0;
-constexpr size_t kPersistChunkBytes = 256U * 1024U;
+const esp_partition_t *show_partition = nullptr;
+
+portMUX_TYPE request_mux = portMUX_INITIALIZER_UNLOCKED;
+volatile bool request_pending = false;
+volatile bool show_request_pending = false;
 
 void release_show_upload_buffer() {
   if (show_upload_buffer != nullptr) {
@@ -50,28 +60,100 @@ void release_installed_show_handoff() {
   installed_show_size = 0;
 }
 
-bool persist_show_buffer(const uint8_t *data, size_t size) {
-  LittleFS.remove(kShowUploadTemp);
-  File out = LittleFS.open(kShowUploadTemp, FILE_WRITE);
-  if (!out) return false;
-  size_t written = 0;
-  while (written < size) {
-    const size_t chunk =
-        size - written < kPersistChunkBytes ? size - written : kPersistChunkBytes;
-    if (out.write(data + written, chunk) != chunk) {
-      out.close();
-      LittleFS.remove(kShowUploadTemp);
+size_t align_up(size_t value, size_t alignment) {
+  return ((value + alignment - 1U) / alignment) * alignment;
+}
+
+size_t raw_show_size() {
+  if (show_partition == nullptr) return 0;
+  RawShowHeader header = {};
+  if (esp_partition_read(show_partition, 0, &header, sizeof(header)) != ESP_OK ||
+      memcmp(header.magic, kRawShowMagic, sizeof(kRawShowMagic)) != 0 ||
+      header.reserved != 0 || header.size < p4show::kHeaderBytes ||
+      header.size > p4show::kMaxPackageBytes ||
+      kRawShowDataOffset + header.size > show_partition->size) {
+    return 0;
+  }
+  return header.size;
+}
+
+bool invalidate_raw_show() {
+  return show_partition != nullptr &&
+         esp_partition_erase_range(show_partition, 0,
+                                   show_partition->erase_size) == ESP_OK;
+}
+
+bool erase_raw_show_for_upload(size_t package_size) {
+  if (show_partition == nullptr ||
+      kRawShowDataOffset + package_size > show_partition->size) {
+    return false;
+  }
+  const size_t erase_bytes = align_up(package_size, show_partition->erase_size);
+  size_t erased = 0;
+  while (erased < erase_bytes) {
+    const size_t remaining = erase_bytes - erased;
+    const size_t chunk = remaining < kRawEraseChunkBytes
+                             ? remaining
+                             : kRawEraseChunkBytes;
+    if (esp_partition_erase_range(show_partition,
+                                  kRawShowDataOffset + erased,
+                                  chunk) != ESP_OK) {
       return false;
     }
-    written += chunk;
+    erased += chunk;
+    // Let the idle task feed the watchdog during a multi-megabyte erase.
+    delay(1);
   }
-  out.close();
   return true;
 }
 
-portMUX_TYPE request_mux = portMUX_INITIALIZER_UNLOCKED;
-volatile bool request_pending = false;
-volatile bool show_request_pending = false;
+bool write_raw_show(const uint8_t *data, size_t size) {
+  if (show_partition == nullptr || data == nullptr ||
+      kRawShowDataOffset + size > show_partition->size) {
+    return false;
+  }
+  size_t written = 0;
+  while (written < size) {
+    const size_t remaining = size - written;
+    const size_t chunk = remaining < kRawWriteChunkBytes
+                             ? remaining
+                             : kRawWriteChunkBytes;
+    if (esp_partition_write(show_partition,
+                            kRawShowDataOffset + written,
+                            data + written, chunk) != ESP_OK) {
+      return false;
+    }
+    written += chunk;
+    delay(1);
+  }
+  return true;
+}
+
+uint8_t *read_raw_show(size_t size) {
+  if (show_partition == nullptr || size < p4show::kHeaderBytes ||
+      size > p4show::kMaxPackageBytes ||
+      kRawShowDataOffset + size > show_partition->size) {
+    return nullptr;
+  }
+  uint8_t *data = static_cast<uint8_t *>(heap_caps_malloc(
+      size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_CACHE_ALIGNED));
+  if (data == nullptr) return nullptr;
+  if (esp_partition_read(show_partition, kRawShowDataOffset, data, size) !=
+      ESP_OK) {
+    heap_caps_free(data);
+    return nullptr;
+  }
+  return data;
+}
+
+bool commit_raw_show(size_t size) {
+  if (show_partition == nullptr) return false;
+  RawShowHeader header = {};
+  memcpy(header.magic, kRawShowMagic, sizeof(kRawShowMagic));
+  header.size = static_cast<uint32_t>(size);
+  return esp_partition_write(show_partition, 0, &header, sizeof(header)) ==
+         ESP_OK;
+}
 
 bool is_gif_name(String name) {
   name.toLowerCase();
@@ -154,7 +236,7 @@ void migrate_to_single_gif() {
     for (File entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
       if (!entry.isDirectory()) {
         const String name = base_name(entry.name());
-        if (name != kCurrentGif && name != kCurrentShow) {
+        if (name != kCurrentGif) {
           removed_bytes += entry.size();
           const String path = String(kMediaDir) + "/" + name;
           entry.close();
@@ -173,15 +255,22 @@ void migrate_to_single_gif() {
 }  // namespace
 
 bool begin() {
+  show_partition = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, static_cast<esp_partition_subtype_t>(0x40),
+      kRawShowPartitionLabel);
+  if (show_partition == nullptr ||
+      show_partition->size < kRawShowDataOffset + p4show::kMaxPackageBytes) {
+    Serial.println("STORAGE ERROR: raw show partition unavailable");
+    return false;
+  }
   if (!LittleFS.begin(true)) return false;
   if (!LittleFS.exists(kMediaDir) && !LittleFS.mkdir(kMediaDir)) return false;
   LittleFS.remove(kUploadTemp);
-  LittleFS.remove(kShowUploadTemp);
-  LittleFS.remove(kShowBackup);
   migrate_to_single_gif();
-  Serial.printf("STORAGE READY: %u/%u bytes used\n",
+  Serial.printf("STORAGE READY: %u/%u LittleFS bytes, raw show %u bytes\n",
                 static_cast<unsigned>(LittleFS.usedBytes()),
-                static_cast<unsigned>(LittleFS.totalBytes()));
+                static_cast<unsigned>(LittleFS.totalBytes()),
+                static_cast<unsigned>(show_partition->size));
   return true;
 }
 
@@ -192,6 +281,7 @@ uint8_t *load_gif(const char *name, size_t *size_out) {
 }
 
 uint8_t *load_show(size_t *size_out) {
+  if (size_out != nullptr) *size_out = 0;
   if (installed_show_data != nullptr) {
     uint8_t *data = installed_show_data;
     const size_t size = installed_show_size;
@@ -200,10 +290,14 @@ uint8_t *load_show(size_t *size_out) {
     if (size_out != nullptr) *size_out = size;
     return data;
   }
-  return load_file(kCurrentShowPath, p4show::kMaxPackageBytes, size_out);
+  const size_t size = raw_show_size();
+  if (size == 0) return nullptr;
+  uint8_t *data = read_raw_show(size);
+  if (data != nullptr && size_out != nullptr) *size_out = size;
+  return data;
 }
 
-bool show_exists() { return LittleFS.exists(kCurrentShowPath); }
+bool show_exists() { return raw_show_size() != 0; }
 
 bool first_gif(char *name, size_t capacity) {
   if (name == nullptr || capacity == 0 || !LittleFS.exists(kCurrentPath)) {
@@ -219,12 +313,11 @@ bool begin_stream_upload(const char *name, size_t expected_size) {
       expected_size > p4gif::kMaxFileBytes) {
     return false;
   }
-
   LittleFS.remove(kUploadTemp);
   LittleFS.remove(kCurrentPath);
+  invalidate_raw_show();
   const size_t free_bytes = LittleFS.totalBytes() - LittleFS.usedBytes();
   if (expected_size > free_bytes) return false;
-
   upload_file = LittleFS.open(kUploadTemp, FILE_WRITE);
   if (!upload_file) return false;
   upload_type = UploadType::kGif;
@@ -238,7 +331,10 @@ bool write_stream_upload(const uint8_t *data, size_t size) {
       upload_received + size > upload_expected) {
     return false;
   }
-  if (upload_type == UploadType::kShow && show_upload_buffer != nullptr) {
+  if (upload_type == UploadType::kShow) {
+    if (show_upload_buffer == nullptr) {
+      return false;
+    }
     memcpy(show_upload_buffer + upload_received, data, size);
     upload_received += size;
     return true;
@@ -253,9 +349,9 @@ bool finish_stream_upload() {
   if (!upload_file || upload_type != UploadType::kGif) return false;
   upload_file.close();
   const bool complete = upload_received == upload_expected;
-  const bool installed = complete && LittleFS.rename(kUploadTemp, kCurrentPath);
+  bool installed = complete && LittleFS.rename(kUploadTemp, kCurrentPath);
+  if (installed && !invalidate_raw_show()) installed = false;
   if (!installed) LittleFS.remove(kUploadTemp);
-  if (installed) LittleFS.remove(kCurrentShowPath);
   Serial.printf("GIF UPLOAD: %u/%u bytes, %s\n",
                 static_cast<unsigned>(upload_received),
                 static_cast<unsigned>(upload_expected),
@@ -271,7 +367,6 @@ void abort_stream_upload() {
   if (upload_file) upload_file.close();
   release_show_upload_buffer();
   LittleFS.remove(kUploadTemp);
-  LittleFS.remove(kShowUploadTemp);
   upload_expected = 0;
   upload_received = 0;
   upload_type = UploadType::kNone;
@@ -280,7 +375,7 @@ void abort_stream_upload() {
 bool clear_media() {
   abort_stream_upload();
   release_installed_show_handoff();
-  bool ok = true;
+  bool ok = invalidate_raw_show();
   size_t removed_bytes = 0;
   File dir = LittleFS.open(kMediaDir);
   if (!dir || !dir.isDirectory()) return false;
@@ -315,27 +410,34 @@ bool begin_show_stream_upload(const char *name, size_t expected_size) {
   show_upload_error = "upload-start";
   if (name == nullptr || !is_show_name(name) ||
       expected_size < p4show::kHeaderBytes ||
-      expected_size > p4show::kMaxPackageBytes) {
+      expected_size > p4show::kMaxPackageBytes ||
+      show_partition == nullptr ||
+      kRawShowDataOffset + expected_size > show_partition->size) {
     show_upload_error = "invalid-request";
     return false;
   }
-  LittleFS.remove(kShowUploadTemp);
-  const size_t free_bytes = LittleFS.totalBytes() - LittleFS.usedBytes();
-  if (expected_size > free_bytes) {
-    show_upload_error = "storage-full";
-    return false;
-  }
+  release_installed_show_handoff();
+  LittleFS.remove(kCurrentPath);
+  const size_t free_psram_before = ESP.getFreePsram();
   show_upload_buffer = static_cast<uint8_t *>(heap_caps_malloc(
       expected_size,
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_CACHE_ALIGNED));
   if (show_upload_buffer == nullptr) {
-    // Without PSRAM headroom fall back to streaming into the temp file.
-    upload_file = LittleFS.open(kShowUploadTemp, FILE_WRITE);
-    if (!upload_file) {
-      show_upload_error = "storage-open";
-      return false;
-    }
+    show_upload_error = "storage-memory";
+    return false;
   }
+  // Remove the old commit marker before accepting the new package. The data
+  // sectors are erased only after the fast PSRAM receive and validation pass,
+  // so flash operations cannot throttle the HTTP request body.
+  if (!invalidate_raw_show()) {
+    release_show_upload_buffer();
+    show_upload_error = "storage-erase";
+    return false;
+  }
+  Serial.printf("SHOW UPLOAD: PSRAM buffer %u bytes, free %u -> %u\n",
+                static_cast<unsigned>(expected_size),
+                static_cast<unsigned>(free_psram_before),
+                static_cast<unsigned>(ESP.getFreePsram()));
   upload_type = UploadType::kShow;
   upload_expected = expected_size;
   upload_received = 0;
@@ -343,79 +445,75 @@ bool begin_show_stream_upload(const char *name, size_t expected_size) {
 }
 
 bool finish_show_stream_upload() {
-  if (upload_type != UploadType::kShow ||
-      (!upload_file && show_upload_buffer == nullptr)) {
+  if (upload_type != UploadType::kShow || show_partition == nullptr ||
+      show_upload_buffer == nullptr) {
     show_upload_error = "upload-state";
     return false;
   }
-  if (upload_file) upload_file.close();
   bool installed = false;
   bool handoff_ready = false;
   p4show::Error validation = p4show::Error::kPackageSize;
   uint32_t validate_ms = 0;
-  uint32_t persist_ms = 0;
+  uint32_t erase_ms = 0;
+  uint32_t write_ms = 0;
+  uint32_t commit_ms = 0;
   if (upload_received == upload_expected) {
-    uint8_t *package_data = show_upload_buffer;
-    size_t package_size = upload_received;
-    if (package_data == nullptr) {
-      package_data =
-          load_file(kShowUploadTemp, p4show::kMaxPackageBytes, &package_size);
-    }
-    if (package_data != nullptr) {
-      const uint32_t validate_start = millis();
-      validation = p4show::validate(package_data, package_size);
-      validate_ms = millis() - validate_start;
-    }
+    Serial.printf("SHOW FINALIZE: validating %u bytes\n",
+                  static_cast<unsigned>(upload_received));
+    const uint32_t validate_start = millis();
+    validation = p4show::validate(show_upload_buffer, upload_received);
+    validate_ms = millis() - validate_start;
     if (validation == p4show::Error::kOk) {
-      const uint32_t persist_start = millis();
-      bool persisted = true;
-      if (show_upload_buffer != nullptr) {
-        persisted = persist_show_buffer(package_data, package_size);
-      }
-      if (persisted) {
-        LittleFS.remove(kShowBackup);
-        const bool had_current = LittleFS.exists(kCurrentShowPath);
-        const bool backed_up =
-            !had_current || LittleFS.rename(kCurrentShowPath, kShowBackup);
-        installed = backed_up &&
-                    LittleFS.rename(kShowUploadTemp, kCurrentShowPath);
-        if (installed) {
-          LittleFS.remove(kShowBackup);
-        } else if (had_current && LittleFS.exists(kShowBackup)) {
-          LittleFS.rename(kShowBackup, kCurrentShowPath);
+      Serial.println("SHOW FINALIZE: erasing raw data range");
+      Serial.flush();
+      const uint32_t erase_start = millis();
+      const bool erased = erase_raw_show_for_upload(upload_received);
+      erase_ms = millis() - erase_start;
+      if (!erased) {
+        show_upload_error = "storage-erase";
+      } else {
+        Serial.println("SHOW FINALIZE: writing raw data range");
+        Serial.flush();
+        const uint32_t write_start = millis();
+        const bool written =
+            write_raw_show(show_upload_buffer, upload_received);
+        write_ms = millis() - write_start;
+        if (!written) {
+          show_upload_error = "install-failed";
+        } else {
+          Serial.println("SHOW FINALIZE: committing header");
+          const uint32_t commit_start = millis();
+          installed = commit_raw_show(upload_received);
+          commit_ms = millis() - commit_start;
         }
       }
-      persist_ms = millis() - persist_start;
     }
-    if (installed && package_data != nullptr) {
-      // The validated PSRAM copy becomes the player's package: playback does
-      // not need to read the file it just wrote.
+    if (installed) {
       release_installed_show_handoff();
-      installed_show_data = package_data;
-      installed_show_size = package_size;
-      if (package_data == show_upload_buffer) show_upload_buffer = nullptr;
+      installed_show_data = show_upload_buffer;
+      installed_show_size = upload_received;
+      show_upload_buffer = nullptr;
       handoff_ready = true;
-    }
-    if (package_data != nullptr && package_data != installed_show_data &&
-        package_data != show_upload_buffer) {
-      heap_caps_free(package_data);
     }
   }
   release_show_upload_buffer();
-  if (!installed) LittleFS.remove(kShowUploadTemp);
-  show_upload_error = installed
-                          ? "none"
-                          : validation == p4show::Error::kOk
-                                ? "install-failed"
-                                : p4show::error_name(validation);
+  if (!installed) invalidate_raw_show();
+  if (installed) {
+    show_upload_error = "none";
+  } else if (validation != p4show::Error::kOk) {
+    show_upload_error = p4show::error_name(validation);
+  } else if (strcmp(show_upload_error, "storage-erase") != 0) {
+    show_upload_error = "install-failed";
+  }
   Serial.printf(
       "SHOW UPLOAD: %u/%u bytes, validation=%s, %s, validate %u ms, "
-      "persist %u ms, %s\n",
+      "erase %u ms, write %u ms, commit %u ms, %s\n",
       static_cast<unsigned>(upload_received),
       static_cast<unsigned>(upload_expected), p4show::error_name(validation),
       installed ? "installed" : "rejected", static_cast<unsigned>(validate_ms),
-      static_cast<unsigned>(persist_ms),
-      handoff_ready ? "ram-handoff" : "file-path");
+      static_cast<unsigned>(erase_ms), static_cast<unsigned>(write_ms),
+      static_cast<unsigned>(commit_ms),
+      handoff_ready ? "ram-handoff" : "no-handoff");
   upload_expected = 0;
   upload_received = 0;
   upload_type = UploadType::kNone;

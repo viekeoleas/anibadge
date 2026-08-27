@@ -96,6 +96,7 @@ class HttpShowDevice implements ShowDevice {
   }) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 10);
+    var transferComplete = false;
     try {
       final uri = Uri.http(_host, '/show/upload', {
         'name': 'current.zshow',
@@ -127,6 +128,7 @@ class HttpShowDevice implements ShowDevice {
       }
       request.add(suffix);
       await request.flush();
+      transferComplete = true;
       onTransferComplete();
 
       final response = await request.close().timeout(responseTimeout);
@@ -148,9 +150,33 @@ class HttpShowDevice implements ShowDevice {
       }
     } on TimeoutException {
       throw TimeoutException('Плата слишком долго проверяет пакет');
+    } on SocketException {
+      if (transferComplete && await _confirmInstalledAfterResponseLoss()) {
+        return;
+      }
+      throw const ShowPublishException(
+        'Плата получила пакет, но связь оборвалась во время его установки',
+      );
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<bool> _confirmInstalledAfterResponseLoss() async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      try {
+        final deviceStatus = await status();
+        if (deviceStatus.state == 'playing') return true;
+        if (deviceStatus.state == 'error' ||
+            deviceStatus.state == 'fallback') {
+          return false;
+        }
+      } catch (_) {
+        // The AP can be briefly busy while LittleFS finishes the install.
+      }
+    }
+    return false;
   }
 
   @override
@@ -213,6 +239,10 @@ String _deviceError(String code) => switch (code) {
       'unsupported-version' => 'Версия пакета не поддерживается прошивкой',
       'target-board' => 'Пакет собран для другой платы',
       'storage-full' => 'На плате недостаточно свободной памяти',
+      'storage-clear' => 'Плата не смогла удалить предыдущее шоу',
+      'storage-erase' =>
+        'Плата не смогла очистить flash для нового шоу',
+      'storage-memory' => 'На плате не хватило PSRAM для шоу',
       'package-size' => 'Передача оборвалась: пакет получен не полностью',
       'install-failed' => 'Плата проверила пакет, но не смогла его установить',
       _ => 'Плата отклонила пакет ($code)',

@@ -9,7 +9,7 @@ frames. All integers are unsigned little-endian values.
 - canvas: exactly 800 x 800;
 - codec: baseline JPEG / SOF0 (`codec = 1`);
 - rate: 1–60 FPS, with an explicit duration on every frame;
-- package size: at most 20 MiB;
+- package size: at most 23 MiB;
 - frame size: at most 212 KiB (180 KiB is the production target);
 - frame count: 1–20,000;
 - player API: package value must be no newer than firmware API 1;
@@ -74,13 +74,13 @@ environment.
 ## Upload and boot behavior
 
 The firmware accepts a multipart POST at
-`/show/upload?name=current.zshow&size=<exact-byte-count>`. When PSRAM has room
-(the player is stopped during upload, so it normally does) the package streams
-directly into a PSRAM buffer, is validated in RAM, and only then is written to
-`/media/current.zshow` in one sequential pass and handed to the player without
-a read-back. Without PSRAM headroom the firmware falls back to streaming into
-a temporary LittleFS file and validating the completed file. In both modes a
-rejected or interrupted upload leaves the previous show intact.
+`/show/upload?name=current.zshow&size=<exact-byte-count>`. The package streams
+into PSRAM while the HTTP transfer is active, so flash latency cannot throttle
+the request body. After the final chunk, the PSRAM copy is validated, the
+required raw-flash range is erased and written sequentially, and a small commit
+header marks the package as bootable. LittleFS is not involved. The previous
+show is invalidated before a replacement upload starts. A rejected or
+interrupted upload leaves the built-in fallback active and can be retried.
 
 On boot, the runtime tries the installed ZSHOW first, then the legacy GIF. A
 valid ZSHOW starts automatically and loops forever. If no playable package

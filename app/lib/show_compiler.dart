@@ -10,6 +10,7 @@ import 'compiled_frame_cache.dart';
 import 'frame_pipeline.dart';
 import 'media_timeline.dart';
 import 'project_model.dart';
+import 'show_package.dart' show maxShowBytes;
 import 'ui_frame_pipeline.dart';
 import 'video_manifest.dart';
 
@@ -20,7 +21,6 @@ export 'ui_frame_pipeline.dart' show UiFramePipeline;
 const int _canvasSize = showCanvasSize;
 const int _headerSize = 64;
 const int _frameEntrySize = 16;
-const int _maxPackageBytes = 20 * 1024 * 1024;
 const int _maxFrames = 20000;
 
 class CompiledFrame {
@@ -879,9 +879,9 @@ Uint8List _buildPackage(List<CompiledFrame> frames) {
       frames.fold<int>(0, (sum, frame) => sum + frame.jpeg.length);
   final payloadOffset = _headerSize + indexSize;
   final packageSize = payloadOffset + payloadSize;
-  if (packageSize > _maxPackageBytes) {
+  if (packageSize > maxShowBytes) {
     throw ShowCompileException(
-      'Шоу занимает ${(packageSize / 1048576).toStringAsFixed(1)} МБ, максимум 20 МБ',
+      'Шоу занимает ${(packageSize / 1048576).toStringAsFixed(1)} МБ, максимум 23 МБ',
     );
   }
 
