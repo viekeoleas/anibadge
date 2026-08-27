@@ -1,10 +1,12 @@
 package com.example.znachok_bmw
 
+import android.annotation.TargetApi
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
+import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -23,6 +25,8 @@ class Mp4FrameNormalizer(private val context: Context) {
         private const val MAX_DIMENSION = 1_200
         private const val MIN_FRAME_STEP_US = 15_000L
         private const val FALLBACK_FRAME_US = 33_333L
+        private const val MAX_BATCH_FRAMES = 16
+        private const val BATCH_BITMAP_BUDGET_BYTES = 48L * 1024L * 1024L
     }
 
     fun normalize(sourcePath: String, outputDirectory: String): String {
@@ -41,36 +45,32 @@ class Mp4FrameNormalizer(private val context: Context) {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(source.path)
-            val framesJson = JSONArray()
+            var framesJson = JSONArray()
             var outputWidth = 0
             var outputHeight = 0
-            extraction.timestampsUs.forEachIndexed { index, timestampUs ->
+            val writeFrame = { index: Int, timestampUs: Long, raw: Bitmap ->
                 if (Thread.currentThread().isInterrupted) {
                     throw InterruptedException("Импорт MP4 отменён")
                 }
-                val raw = retriever.getFrameAtTime(
-                    timestampUs,
-                    MediaMetadataRetriever.OPTION_CLOSEST,
-                ) ?: throw Mp4NormalizeException(
-                    "MP4_CODEC",
-                    "Android не смог декодировать кадр ${index + 1}; кодек MP4 не поддерживается",
-                )
                 val bitmap = scaleForBadge(raw)
                 if (bitmap !== raw) raw.recycle()
                 outputWidth = bitmap.width
                 outputHeight = bitmap.height
                 val fileName = "frame-${index.toString().padStart(5, '0')}.jpg"
                 val frameFile = File(staging, fileName)
-                FileOutputStream(frameFile).use { stream ->
-                    if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)) {
-                        throw Mp4NormalizeException(
-                            "MP4_STORAGE",
-                            "Не удалось сохранить кадр ${index + 1}",
-                        )
+                try {
+                    FileOutputStream(frameFile).use { stream ->
+                        if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)) {
+                            throw Mp4NormalizeException(
+                                "MP4_STORAGE",
+                                "Не удалось сохранить кадр ${index + 1}",
+                            )
+                        }
                     }
+                } finally {
+                    bitmap.recycle()
                 }
-                bitmap.recycle()
-                val nextTimestampUs = extraction.timestampsUs.getOrNull(index + 1)
+                val nextTimestampUs = extraction.frames.getOrNull(index + 1)?.timestampUs
                 val durationUs = if (nextTimestampUs != null) {
                     nextTimestampUs - timestampUs
                 } else {
@@ -81,6 +81,23 @@ class Mp4FrameNormalizer(private val context: Context) {
                         .put("file", fileName)
                         .put("durationUs", durationUs),
                 )
+                Unit
+            }
+            val batchSize = decodeBatchSize(extraction.width, extraction.height)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && batchSize > 1) {
+                try {
+                    decodeFrameBatches(retriever, extraction.frames, batchSize, writeFrame)
+                } catch (_: BatchDecodeException) {
+                    staging.listFiles()
+                        ?.filter { it.name.startsWith("frame-") && it.extension == "jpg" }
+                        ?.forEach { it.delete() }
+                    framesJson = JSONArray()
+                    outputWidth = 0
+                    outputHeight = 0
+                    decodeFramesAtTimestamps(retriever, extraction, writeFrame)
+                }
+            } else {
+                decodeFramesAtTimestamps(retriever, extraction, writeFrame)
             }
             val manifest = JSONObject()
                 .put("version", 1)
@@ -163,20 +180,20 @@ class Mp4FrameNormalizer(private val context: Context) {
                 }
                 if (!extractor.advance()) break
             }
-            val sorted = rawTimestamps.distinct().sorted()
+            val sorted = rawTimestamps.sorted()
             if (sorted.isEmpty()) {
                 throw Mp4NormalizeException(
                     "MP4_NO_FRAMES",
                     "В выбранном MP4 не найдено кадров",
                 )
             }
-            val timestamps = mutableListOf<Long>()
-            for (timestampUs in sorted) {
-                if (timestamps.isEmpty() || timestampUs - timestamps.last() >= MIN_FRAME_STEP_US) {
-                    timestamps.add(timestampUs)
+            val frames = mutableListOf<FrameRequest>()
+            for ((frameIndex, timestampUs) in sorted.withIndex()) {
+                if (frames.isEmpty() || timestampUs - frames.last().timestampUs >= MIN_FRAME_STEP_US) {
+                    frames.add(FrameRequest(frameIndex, timestampUs))
                 }
             }
-            if (timestamps.size > MAX_FRAMES) {
+            if (frames.size > MAX_FRAMES) {
                 throw Mp4NormalizeException(
                     "MP4_TOO_LONG",
                     "В MP4 слишком много кадров для внутренней памяти значка",
@@ -189,9 +206,19 @@ class Mp4FrameNormalizer(private val context: Context) {
             }
             val durationUs = max(
                 declaredDurationUs,
-                timestamps.last() + fallbackDuration(timestamps),
+                frames.last().timestampUs + fallbackDuration(frames.map { it.timestampUs }),
             )
-            return Timeline(timestamps, durationUs)
+            val width = if (format.containsKey(MediaFormat.KEY_WIDTH)) {
+                format.getInteger(MediaFormat.KEY_WIDTH)
+            } else {
+                0
+            }
+            val height = if (format.containsKey(MediaFormat.KEY_HEIGHT)) {
+                format.getInteger(MediaFormat.KEY_HEIGHT)
+            } else {
+                0
+            }
+            return Timeline(frames, durationUs, width, height)
         } finally {
             extractor.release()
         }
@@ -203,6 +230,95 @@ class Mp4FrameNormalizer(private val context: Context) {
         } else {
             FALLBACK_FRAME_US
         }
+
+    @TargetApi(Build.VERSION_CODES.P)
+    private fun decodeFrameBatches(
+        retriever: MediaMetadataRetriever,
+        requests: List<FrameRequest>,
+        batchSize: Int,
+        consume: (Int, Long, Bitmap) -> Unit,
+    ) {
+        var requestCursor = 0
+        while (requestCursor < requests.size) {
+            val firstFrameIndex = requests[requestCursor].frameIndex
+            var lastRequest = requestCursor
+            while (lastRequest + 1 < requests.size &&
+                requests[lastRequest + 1].frameIndex - firstFrameIndex < batchSize
+            ) {
+                lastRequest++
+            }
+            val decodedCount = requests[lastRequest].frameIndex - firstFrameIndex + 1
+            val decoded = try {
+                retriever.getFramesAtIndex(firstFrameIndex, decodedCount)
+            } catch (error: Exception) {
+                throw BatchDecodeException(error)
+            }
+            if (decoded.size < decodedCount) {
+                decoded.forEach { it.recycle() }
+                throw BatchDecodeException(
+                    IllegalStateException("Android returned an incomplete MP4 frame batch"),
+                )
+            }
+            try {
+                for (requestIndex in requestCursor..lastRequest) {
+                    val request = requests[requestIndex]
+                    consume(
+                        requestIndex,
+                        request.timestampUs,
+                        decoded[request.frameIndex - firstFrameIndex],
+                    )
+                }
+            } finally {
+                decoded.filterNot { it.isRecycled }.forEach { it.recycle() }
+            }
+            requestCursor = lastRequest + 1
+        }
+    }
+
+    private fun decodeFramesAtTimestamps(
+        retriever: MediaMetadataRetriever,
+        timeline: Timeline,
+        consume: (Int, Long, Bitmap) -> Unit,
+    ) {
+        val scaledSize = scaledSize(timeline.width, timeline.height)
+        timeline.frames.forEachIndexed { index, request ->
+            val raw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 && scaledSize != null) {
+                retriever.getScaledFrameAtTime(
+                    request.timestampUs,
+                    MediaMetadataRetriever.OPTION_CLOSEST,
+                    scaledSize.first,
+                    scaledSize.second,
+                )
+            } else {
+                retriever.getFrameAtTime(
+                    request.timestampUs,
+                    MediaMetadataRetriever.OPTION_CLOSEST,
+                )
+            } ?: throw Mp4NormalizeException(
+                "MP4_CODEC",
+                "Android не смог декодировать кадр ${index + 1}; кодек MP4 не поддерживается",
+            )
+            consume(index, request.timestampUs, raw)
+        }
+    }
+
+    private fun decodeBatchSize(width: Int, height: Int): Int {
+        if (width <= 0 || height <= 0) return 4
+        val bitmapBytes = width.toLong() * height.toLong() * 4L
+        return (BATCH_BITMAP_BUDGET_BYTES / bitmapBytes)
+            .coerceIn(1L, MAX_BATCH_FRAMES.toLong())
+            .toInt()
+    }
+
+    private fun scaledSize(width: Int, height: Int): Pair<Int, Int>? {
+        val largest = max(width, height)
+        if (largest <= MAX_DIMENSION || width <= 0 || height <= 0) return null
+        val factor = MAX_DIMENSION.toDouble() / largest
+        return Pair(
+            max(1, (width * factor).roundToInt()),
+            max(1, (height * factor).roundToInt()),
+        )
+    }
 
     private fun scaleForBadge(bitmap: Bitmap): Bitmap {
         val largest = max(bitmap.width, bitmap.height)
@@ -217,7 +333,16 @@ class Mp4FrameNormalizer(private val context: Context) {
     }
 
     private data class Timeline(
-        val timestampsUs: List<Long>,
+        val frames: List<FrameRequest>,
         val durationUs: Long,
+        val width: Int,
+        val height: Int,
     )
+
+    private data class FrameRequest(
+        val frameIndex: Int,
+        val timestampUs: Long,
+    )
+
+    private class BatchDecodeException(cause: Exception) : Exception(cause)
 }
