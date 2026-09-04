@@ -178,6 +178,24 @@ ThemeData _buildZnachokTheme() {
         borderRadius: BorderRadius.all(Radius.circular(16)),
       ),
     ),
+    navigationBarTheme: const NavigationBarThemeData(
+      height: 72,
+      backgroundColor: _ZColors.surface,
+      indicatorColor: _ZColors.surfaceSelected,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+    ),
+    navigationRailTheme: const NavigationRailThemeData(
+      backgroundColor: _ZColors.background,
+      indicatorColor: _ZColors.surfaceSelected,
+      selectedIconTheme: IconThemeData(color: _ZColors.primary),
+      unselectedIconTheme: IconThemeData(color: _ZColors.textMuted),
+      selectedLabelTextStyle: TextStyle(
+        color: _ZColors.text,
+        fontWeight: FontWeight.w700,
+      ),
+      unselectedLabelTextStyle: TextStyle(color: _ZColors.textMuted),
+    ),
     progressIndicatorTheme: const ProgressIndicatorThemeData(
       color: _ZColors.primary,
       linearTrackColor: _ZColors.surfaceRaised,
@@ -240,6 +258,8 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
+enum _FlowStep { media, compose, timeline, publish }
+
 class _HomePageState extends State<HomePage> {
   late final ShowDevice _device;
   late final ShowPublisher _publisher;
@@ -253,6 +273,7 @@ class _HomePageState extends State<HomePage> {
   double? _compileProgress;
   bool _publishing = false;
   bool _clearing = false;
+  _FlowStep _step = _FlowStep.media;
   Timer? _saveDebounce;
   String _status = 'Загрузка проекта…';
   PublishState _publishState = const PublishState(
@@ -273,6 +294,8 @@ class _HomePageState extends State<HomePage> {
       _store = widget.store;
       _project = initialProject;
       _selectedId = initialProject.clips.firstOrNull?.id;
+      _step =
+          initialProject.clips.isEmpty ? _FlowStep.media : _FlowStep.compose;
       _loading = false;
       _status = initialProject.clips.isEmpty
           ? 'Добавьте PNG, JPEG, GIF или MP4'
@@ -289,6 +312,7 @@ class _HomePageState extends State<HomePage> {
         _store = store;
         _project = project;
         _selectedId = project.clips.isEmpty ? null : project.clips.first.id;
+        _step = project.clips.isEmpty ? _FlowStep.media : _FlowStep.compose;
         _loading = false;
         _status = project.clips.isEmpty
             ? 'Добавьте PNG, JPEG, GIF или MP4'
@@ -950,414 +974,606 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Widget _buildWorkspace(ShowClip? selected) {
-    return Column(
-      children: [
-        _StudioPanel(
-          title: selected == null ? 'Холст' : 'Холст клипа',
-          subtitle: selected == null
-              ? 'Здесь появится выбранный клип'
-              : 'Перемещайте, масштабируйте и вращайте медиа жестами',
-          child: selected == null
-              ? const _EmptyProject()
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+  bool _canOpenStep(_FlowStep step) => true;
+
+  void _selectStep(_FlowStep step) {
+    if (!_canOpenStep(step) || step == _step) return;
+    setState(() => _step = step);
+  }
+
+  void _previousStep() {
+    if (_step.index == 0) return;
+    _selectStep(_FlowStep.values[_step.index - 1]);
+  }
+
+  Future<void> _nextStep() async {
+    if (_step == _FlowStep.publish) {
+      await _publish();
+      return;
+    }
+    if (_project.clips.isEmpty) {
+      await _showAddContentSheet();
+      return;
+    }
+    _selectStep(_FlowStep.values[_step.index + 1]);
+  }
+
+  String get _nextStepLabel => switch (_step) {
+        _FlowStep.media => 'К кадру',
+        _FlowStep.compose => 'К таймлайну',
+        _FlowStep.timeline => 'К загрузке',
+        _FlowStep.publish => _publishState.stage == PublishStage.failed
+            ? 'Повторить'
+            : 'Загрузить',
+      };
+
+  Future<void> _showAddContentSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      backgroundColor: _ZColors.surface,
+      showDragHandle: true,
+      builder: (sheetContext) => Center(
+        heightFactor: 1,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 620),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
                   children: [
-                    Center(
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 520),
-                        child: AspectRatio(
-                          aspectRatio: 1,
-                          child: DraftClipCanvas(
-                            clip: selected,
-                            onChanged: _replaceClip,
-                          ),
-                        ),
+                    Expanded(
+                      child: Text(
+                        'Добавить',
+                        style: Theme.of(sheetContext).textTheme.titleLarge,
                       ),
                     ),
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            selected.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.titleMedium,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        _ClipKindBadge(kind: selected.kind),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    SegmentedButton<ClipLayout>(
-                      segments: const [
-                        ButtonSegment(
-                          value: ClipLayout.fit,
-                          icon: Icon(Icons.fit_screen_outlined),
-                          label: Text('Вписать'),
-                        ),
-                        ButtonSegment(
-                          value: ClipLayout.fill,
-                          icon: Icon(Icons.crop_free),
-                          label: Text('Заполнить'),
-                        ),
-                      ],
-                      selected: {selected.layout},
-                      showSelectedIcon: false,
-                      onSelectionChanged: (value) => _replaceClip(
-                        selected.copyWith(layout: value.first, scale: 1),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        OutlinedButton.icon(
-                          onPressed: () => _replaceClip(selected.copyWith(
-                            offsetX: 0,
-                            offsetY: 0,
-                          )),
-                          icon: const Icon(Icons.center_focus_strong_outlined),
-                          label: const Text('По центру'),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed: () => _replaceClip(selected.copyWith(
-                            layout: ClipLayout.fit,
-                            offsetX: 0,
-                            offsetY: 0,
-                            scale: 1,
-                            rotation: 0,
-                          )),
-                          icon: const Icon(Icons.restart_alt),
-                          label: const Text('Сбросить'),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed: _editTiming,
-                          icon: const Icon(Icons.timer_outlined),
-                          label: const Text('Тайминг'),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed: _project.clips.length < 2
-                              ? null
-                              : _editTransition,
-                          icon: const Icon(Icons.auto_awesome_outlined),
-                          label: Text(
-                            selected.outgoingTransition == TransitionKind.none
-                                ? 'Переход'
-                                : selected.outgoingTransition.label,
-                          ),
-                        ),
-                        if (selected.kind.isGenerated)
-                          OutlinedButton.icon(
-                            onPressed: _editGenerated,
-                            icon: const Icon(Icons.tune),
-                            label: const Text('Контент'),
-                          ),
-                      ],
+                    IconButton(
+                      tooltip: 'Закрыть',
+                      onPressed: () => Navigator.pop(sheetContext),
+                      icon: const Icon(Icons.close),
                     ),
                   ],
                 ),
-        ),
-        if (_project.clips.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          _StudioPanel(
-            title: 'Живое превью проекта',
-            subtitle: 'Воспроизведение всех клипов и переходов по порядку',
-            child: Column(
-              children: [
-                Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 420),
-                    child: AspectRatio(
-                      aspectRatio: 1,
-                      child: DecoratedBox(
-                        decoration: const BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Color(0xFF030507),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Color(0x452C84D8),
-                              blurRadius: 36,
-                              spreadRadius: -14,
-                            ),
-                          ],
+                const SizedBox(height: 8),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final itemWidth = (constraints.maxWidth - 8) / 2;
+                    Widget choice({
+                      required String label,
+                      required IconData icon,
+                      required VoidCallback onPressed,
+                    }) =>
+                        SizedBox(
+                          width: itemWidth,
+                          child: OutlinedButton.icon(
+                            onPressed: onPressed,
+                            icon: Icon(icon),
+                            label: Text(label),
+                          ),
+                        );
+                    return Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        choice(
+                          label: 'Медиа',
+                          icon: Icons.add_photo_alternate_outlined,
+                          onPressed: () {
+                            Navigator.pop(sheetContext);
+                            unawaited(_importMedia());
+                          },
                         ),
-                        child: ProjectDraftPreview(project: _project),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Превью работает напрямую с исходными клипами. JPEG для значка создаётся только перед загрузкой.',
-                  textAlign: TextAlign.center,
+                        choice(
+                          label: 'Текст',
+                          icon: Icons.text_fields_outlined,
+                          onPressed: () {
+                            Navigator.pop(sheetContext);
+                            unawaited(_addTextCard());
+                          },
+                        ),
+                        choice(
+                          label: 'Логотип',
+                          icon: Icons.branding_watermark_outlined,
+                          onPressed: () {
+                            Navigator.pop(sheetContext);
+                            unawaited(_addLogoCard());
+                          },
+                        ),
+                        choice(
+                          label: 'Фон',
+                          icon: Icons.blur_circular_outlined,
+                          onPressed: () {
+                            Navigator.pop(sheetContext);
+                            unawaited(
+                              _addGeneratedMotion(ClipKind.ambient),
+                            );
+                          },
+                        ),
+                        choice(
+                          label: 'Бегущая строка',
+                          icon: Icons.view_headline_outlined,
+                          onPressed: () {
+                            Navigator.pop(sheetContext);
+                            unawaited(
+                              _addGeneratedMotion(ClipKind.ticker),
+                            );
+                          },
+                        ),
+                      ],
+                    );
+                  },
                 ),
               ],
             ),
           ),
-        ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMediaStep() {
+    if (_project.clips.isEmpty) {
+      return Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(
+                Icons.video_collection_outlined,
+                size: 64,
+                color: _ZColors.primary,
+              ),
+              const SizedBox(height: 18),
+              Text(
+                'Добавьте медиа',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 18),
+              FilledButton.icon(
+                key: const ValueKey('add-content-empty'),
+                onPressed: _showAddContentSheet,
+                icon: const Icon(Icons.add),
+                label: const Text('Добавить'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final horizontal = constraints.maxWidth > 840
+            ? (constraints.maxWidth - 800) / 2
+            : 16.0;
+        return ListView.separated(
+          key: const ValueKey('media-list'),
+          padding: EdgeInsets.fromLTRB(horizontal, 12, horizontal, 24),
+          itemCount: _project.clips.length + 1,
+          separatorBuilder: (_, __) => const Divider(),
+          itemBuilder: (context, index) {
+            if (index == _project.clips.length) {
+              return Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: OutlinedButton.icon(
+                  onPressed: _showAddContentSheet,
+                  icon: const Icon(Icons.add),
+                  label: const Text('Добавить'),
+                ),
+              );
+            }
+            final clip = _project.clips[index];
+            final selected = clip.id == _selectedId;
+            return ListTile(
+              key: ValueKey('media-${clip.id}'),
+              selected: selected,
+              onTap: () => setState(() => _selectedId = clip.id),
+              leading: SizedBox.square(
+                dimension: 48,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: selected
+                        ? _ZColors.primary.withValues(alpha: 0.14)
+                        : _ZColors.surfaceRaised,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    _clipKindIcon(clip.kind),
+                    color: selected ? _ZColors.primary : _ZColors.textMuted,
+                  ),
+                ),
+              ),
+              title: Text(
+                clip.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: IconButton(
+                tooltip: 'Удалить ${clip.name}',
+                onPressed: () {
+                  setState(() => _selectedId = clip.id);
+                  _deleteSelected();
+                },
+                icon: const Icon(Icons.delete_outline),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildClipStrip() {
+    return SizedBox(
+      height: 66,
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(12, 7, 12, 7),
+        scrollDirection: Axis.horizontal,
+        itemCount: _project.clips.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 6),
+        itemBuilder: (context, index) {
+          final clip = _project.clips[index];
+          final selected = clip.id == _selectedId;
+          return Semantics(
+            button: true,
+            selected: selected,
+            label: 'Открыть ${clip.name}',
+            child: Material(
+              color: selected ? _ZColors.surfaceSelected : Colors.transparent,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+                side: BorderSide(
+                  color: selected ? _ZColors.primary : _ZColors.border,
+                ),
+              ),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: () => setState(() => _selectedId = clip.id),
+                child: SizedBox(
+                  width: 142,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    child: Row(
+                      children: [
+                        Icon(
+                          _clipKindIcon(clip.kind),
+                          size: 20,
+                          color:
+                              selected ? _ZColors.primary : _ZColors.textMuted,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            clip.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelLarge,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildComposeStep() {
+    final selected = _selectedClip;
+    if (selected == null) return _buildMediaStep();
+
+    return Column(
+      children: [
+        _buildClipStrip(),
+        const Divider(),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Center(
+              child: ConstrainedBox(
+                constraints:
+                    const BoxConstraints(maxWidth: 680, maxHeight: 680),
+                child: AspectRatio(
+                  aspectRatio: 1,
+                  child: KeyedSubtree(
+                    key: const ValueKey('compose-canvas'),
+                    child: DraftClipCanvas(
+                      clip: selected,
+                      onChanged: _replaceClip,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        const Divider(),
+        SizedBox(
+          height: 62,
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            scrollDirection: Axis.horizontal,
+            children: [
+              SegmentedButton<ClipLayout>(
+                segments: const [
+                  ButtonSegment(
+                    value: ClipLayout.fit,
+                    label: Text('Вписать'),
+                  ),
+                  ButtonSegment(
+                    value: ClipLayout.fill,
+                    label: Text('Заполнить'),
+                  ),
+                ],
+                selected: {selected.layout},
+                showSelectedIcon: false,
+                onSelectionChanged: (value) => _replaceClip(
+                  selected.copyWith(layout: value.first, scale: 1),
+                ),
+                style: const ButtonStyle(
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
+              const SizedBox(width: 8),
+              _EditorTool(
+                label: 'X',
+                icon: Icons.align_horizontal_center,
+                onPressed: () => _replaceClip(selected.copyWith(offsetX: 0)),
+              ),
+              _EditorTool(
+                label: 'Y',
+                icon: Icons.align_vertical_center,
+                onPressed: () => _replaceClip(selected.copyWith(offsetY: 0)),
+              ),
+              _EditorTool(
+                label: '0°',
+                icon: Icons.straighten,
+                onPressed: () => _replaceClip(selected.copyWith(rotation: 0)),
+              ),
+              _EditorTool(
+                label: 'Сброс',
+                icon: Icons.restart_alt,
+                onPressed: () => _replaceClip(
+                  selected.copyWith(
+                    layout: ClipLayout.fit,
+                    offsetX: 0,
+                    offsetY: 0,
+                    scale: 1,
+                    rotation: 0,
+                  ),
+                ),
+              ),
+              if (selected.kind.isGenerated)
+                _EditorTool(
+                  label: 'Контент',
+                  icon: Icons.tune,
+                  onPressed: _editGenerated,
+                ),
+            ],
+          ),
+        ),
       ],
     );
   }
 
-  Widget _buildMediaLibrary() {
-    return _StudioPanel(
-      title: 'Добавить контент',
-      subtitle: 'Импортируйте медиа или создайте клип внутри приложения',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          FilledButton.icon(
-            onPressed: _importMedia,
-            icon: const Icon(Icons.add_photo_alternate_outlined),
-            label: const Text('Добавить PNG, JPEG, GIF или MP4'),
-          ),
-          const SizedBox(height: 10),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final itemWidth = (constraints.maxWidth - 8) / 2;
-              return Wrap(
-                spacing: 8,
-                runSpacing: 8,
+  Widget _buildTimelineStep() {
+    if (_project.clips.isEmpty) return _buildMediaStep();
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final horizontal = constraints.maxWidth > 840
+            ? (constraints.maxWidth - 800) / 2
+            : 12.0;
+        return Column(
+          children: [
+            Expanded(
+              child: ReorderableListView.builder(
+                key: const ValueKey('timeline-list'),
+                padding: EdgeInsets.fromLTRB(horizontal, 10, horizontal, 10),
+                buildDefaultDragHandles: false,
+                itemCount: _project.clips.length,
+                onReorderItem: _reorder,
+                itemBuilder: (context, index) {
+                  final clip = _project.clips[index];
+                  final selected = clip.id == _selectedId;
+                  final timing = clip.kind.isGeneratedMotion
+                      ? '60 FPS'
+                      : clip.kind.isMotion
+                          ? '${clip.speed}× · ${clip.repeat}×'
+                          : '${(clip.durationMs / 1000).toStringAsFixed(1)} с';
+                  return DecoratedBox(
+                    key: ValueKey(clip.id),
+                    decoration: const BoxDecoration(
+                      border: Border(
+                        bottom: BorderSide(color: _ZColors.border),
+                      ),
+                    ),
+                    child: ListTile(
+                      selected: selected,
+                      onTap: () => setState(() => _selectedId = clip.id),
+                      leading: Icon(_clipKindIcon(clip.kind)),
+                      title: Text(
+                        clip.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        clip.outgoingTransition == TransitionKind.none
+                            ? timing
+                            : '$timing · ${clip.outgoingTransition.label}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: ReorderableDragStartListener(
+                        index: index,
+                        child: const SizedBox.square(
+                          dimension: 48,
+                          child: Icon(Icons.drag_handle_rounded),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const Divider(),
+            SizedBox(
+              height: 62,
+              child: ListView(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                scrollDirection: Axis.horizontal,
                 children: [
-                  SizedBox(
-                    width: itemWidth,
-                    child: OutlinedButton.icon(
-                      onPressed: _addTextCard,
-                      icon: const Icon(Icons.text_fields_outlined),
-                      label: const Text('Text-card'),
-                    ),
+                  _EditorTool(
+                    label: 'Тайминг',
+                    icon: Icons.timer_outlined,
+                    onPressed: _editTiming,
                   ),
-                  SizedBox(
-                    width: itemWidth,
-                    child: OutlinedButton.icon(
-                      onPressed: _addLogoCard,
-                      icon: const Icon(Icons.branding_watermark_outlined),
-                      label: const Text('Logo-card'),
-                    ),
+                  _EditorTool(
+                    label: _selectedClip?.outgoingTransition ==
+                            TransitionKind.none
+                        ? 'Переход'
+                        : _selectedClip?.outgoingTransition.label ?? 'Переход',
+                    icon: Icons.auto_awesome_outlined,
+                    onPressed:
+                        _project.clips.length < 2 ? null : _editTransition,
                   ),
-                  SizedBox(
-                    width: itemWidth,
-                    child: OutlinedButton.icon(
-                      onPressed: () => _addGeneratedMotion(ClipKind.ambient),
-                      icon: const Icon(Icons.blur_circular_outlined),
-                      label: const Text('Ambient'),
-                    ),
+                  _EditorTool(
+                    label: 'Копия',
+                    icon: Icons.copy_outlined,
+                    onPressed: _duplicateSelected,
                   ),
-                  SizedBox(
-                    width: itemWidth,
-                    child: OutlinedButton.icon(
-                      onPressed: () => _addGeneratedMotion(ClipKind.ticker),
-                      icon: const Icon(Icons.view_headline_outlined),
-                      label: const Text('Ticker'),
-                    ),
+                  _EditorTool(
+                    label: 'Удалить',
+                    icon: Icons.delete_outline,
+                    danger: true,
+                    onPressed: _deleteSelected,
                   ),
                 ],
-              );
-            },
-          ),
-        ],
-      ),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
-  Widget _buildTimeline() {
-    return _StudioPanel(
-      title: 'Порядок клипов',
-      subtitle:
-          '${_project.clips.length} ${_clipCountLabel(_project.clips.length)}',
-      padding: const EdgeInsets.fromLTRB(12, 18, 12, 12),
-      child: Column(
-        children: [
-          ReorderableListView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            buildDefaultDragHandles: false,
-            itemCount: _project.clips.length,
-            onReorderItem: _reorder,
-            itemBuilder: (context, index) {
-              final clip = _project.clips[index];
-              final selected = clip.id == _selectedId;
-              return Padding(
-                key: ValueKey(clip.id),
-                padding: const EdgeInsets.only(bottom: 6),
-                child: ListTile(
-                  selected: selected,
-                  onTap: () => setState(() => _selectedId = clip.id),
-                  leading: Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: selected
-                          ? _ZColors.primary.withValues(alpha: 0.16)
-                          : _ZColors.surfaceRaised,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Icon(
-                      _clipKindIcon(clip.kind),
-                      color: selected ? _ZColors.primary : _ZColors.textMuted,
-                      size: 21,
-                    ),
+  Widget _buildPublishStep() {
+    final busy = _publishing || _compiling || _clearing;
+    final showStatus = busy ||
+        _publishState.stage == PublishStage.failed ||
+        _publishState.stage == PublishStage.complete;
+    return Column(
+      children: [
+        Expanded(
+          child: _project.clips.isEmpty
+              ? Center(
+                  child: Text(
+                    'Нет клипов',
+                    style: Theme.of(context).textTheme.titleLarge,
                   ),
-                  title: Text(
-                    clip.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  subtitle: Text(
-                    [
-                      if (clip.kind.isGeneratedMotion)
-                        '60 FPS · зациклено'
-                      else if (!clip.kind.isMotion)
-                        '${(clip.durationMs / 1000).toStringAsFixed(1)} сек'
-                      else
-                        '${clip.speed}× · ${clip.repeat} повтор(а)',
-                      if (clip.outgoingTransition != TransitionKind.none)
-                        '→ ${clip.outgoingTransition.label}',
-                    ].join(' · '),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: Semantics(
-                    button: true,
-                    label: 'Изменить позицию клипа ${clip.name}',
-                    child: ReorderableDragStartListener(
-                      index: index,
-                      child: const SizedBox.square(
-                        dimension: 48,
-                        child: Icon(Icons.drag_handle_rounded),
+                )
+              : Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints:
+                          const BoxConstraints(maxWidth: 680, maxHeight: 680),
+                      child: AspectRatio(
+                        aspectRatio: 1,
+                        child: DecoratedBox(
+                          key: const ValueKey('publish-preview'),
+                          decoration: const BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.black,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Color(0x382C84D8),
+                                blurRadius: 32,
+                                spreadRadius: -12,
+                              ),
+                            ],
+                          ),
+                          child: ProjectDraftPreview(project: _project),
+                        ),
                       ),
                     ),
                   ),
                 ),
-              );
-            },
+        ),
+        if (busy || _publishState.progress != null)
+          LinearProgressIndicator(
+            minHeight: 4,
+            value: _compiling ? _compileProgress : _publishState.progress,
           ),
-          const SizedBox(height: 6),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final duplicate = OutlinedButton.icon(
-                onPressed: _duplicateSelected,
-                icon: const Icon(Icons.copy_outlined),
-                label: const Text('Дублировать'),
-              );
-              final delete = OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: _ZColors.danger,
-                  side: BorderSide(
-                    color: _ZColors.danger.withValues(alpha: 0.55),
-                  ),
-                ),
-                onPressed: _deleteSelected,
-                icon: const Icon(Icons.delete_outline),
-                label: const Text('Удалить'),
-              );
-              if (constraints.maxWidth < 360) {
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    duplicate,
-                    const SizedBox(height: 8),
-                    delete,
-                  ],
-                );
-              }
-              return Row(
+        if (showStatus)
+          Semantics(
+            liveRegion: true,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 2),
+              child: Row(
                 children: [
-                  Expanded(child: duplicate),
-                  const SizedBox(width: 8),
-                  Expanded(child: delete),
+                  Icon(
+                    _publishState.stage == PublishStage.failed
+                        ? Icons.error_outline
+                        : _publishState.stage == PublishStage.complete
+                            ? Icons.check_circle_outline
+                            : Icons.sync,
+                    size: 20,
+                    color: _publishState.stage == PublishStage.failed
+                        ? _ZColors.danger
+                        : _ZColors.primary,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      _clearing ? _status : _publishState.message,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
                 ],
-              );
-            },
+              ),
+            ),
           ),
-        ],
-      ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _clearing ? null : _clearDeviceMedia,
+              icon: const Icon(Icons.delete_sweep_outlined),
+              label: const Text('Очистить память значка'),
+              style: TextButton.styleFrom(foregroundColor: _ZColors.textMuted),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
-  Widget _buildPublishPanel() {
-    final busy = _publishing || _compiling;
-    return _StudioPanel(
-      title: 'Публикация',
-      subtitle: 'Подготовка кадров и передача шоу на устройство',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (_project.clips.isNotEmpty) ...[
-            FilledButton.icon(
-              onPressed: busy ? null : _publish,
-              icon: busy
-                  ? const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.rocket_launch_outlined),
-              label: Text(
-                _publishState.stage == PublishStage.failed
-                    ? 'Повторить загрузку'
-                    : 'Подготовить и загрузить на значок',
-              ),
-            ),
-            if (busy || _publishState.progress != null) ...[
-              const SizedBox(height: 14),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  minHeight: 6,
-                  value: _compiling ? _compileProgress : _publishState.progress,
-                ),
-              ),
-            ],
-            const SizedBox(height: 12),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  _publishState.stage == PublishStage.failed
-                      ? Icons.error_outline
-                      : Icons.info_outline,
-                  size: 19,
-                  color: _publishState.stage == PublishStage.failed
-                      ? _ZColors.danger
-                      : _ZColors.textMuted,
-                ),
-                const SizedBox(width: 8),
-                Expanded(child: Text(_publishState.message)),
-              ],
-            ),
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 18),
-              child: Divider(),
-            ),
-          ],
-          OutlinedButton.icon(
-            style: OutlinedButton.styleFrom(
-              foregroundColor: _ZColors.danger,
-              side: BorderSide(
-                color: _ZColors.danger.withValues(alpha: 0.45),
-              ),
-            ),
-            onPressed: _clearing ? null : _clearDeviceMedia,
-            icon: _clearing
-                ? const SizedBox.square(
-                    dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.delete_sweep_outlined),
-            label: const Text('Очистить память значка'),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget _buildCurrentStep() => switch (_step) {
+        _FlowStep.media => _buildMediaStep(),
+        _FlowStep.compose => _buildComposeStep(),
+        _FlowStep.timeline => _buildTimelineStep(),
+        _FlowStep.publish => _buildPublishStep(),
+      };
 
   @override
   Widget build(BuildContext context) {
-    final selected = _selectedClip;
+    final busy = _publishing || _compiling || _clearing;
+    final canContinue = _project.clips.isNotEmpty && !busy;
+    final reduceMotion =
+        MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -1378,7 +1594,7 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(width: 12),
             const Expanded(
               child: Text(
-                'Znachok — редактор',
+                'Znachok',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -1386,8 +1602,16 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
         actions: [
+          if (!_loading &&
+              (_step == _FlowStep.media || _step == _FlowStep.compose))
+            IconButton(
+              key: const ValueKey('add-content'),
+              tooltip: 'Добавить',
+              onPressed: _showAddContentSheet,
+              icon: const Icon(Icons.add),
+            ),
           Padding(
-            padding: const EdgeInsets.only(right: 20),
+            padding: const EdgeInsets.only(right: 12),
             child: Center(
               child: _ProjectCount(clips: _project.clips.length),
             ),
@@ -1397,66 +1621,38 @@ class _HomePageState extends State<HomePage> {
       body: _loading
           ? const _LoadingStudio()
           : SafeArea(
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final wide = constraints.maxWidth >= 980;
-                  final horizontalPadding = wide ? 28.0 : 16.0;
-                  final sidePanel = Column(
-                    children: [
-                      _buildMediaLibrary(),
-                      if (_project.clips.isNotEmpty) ...[
-                        const SizedBox(height: 16),
-                        _buildTimeline(),
-                      ],
-                      const SizedBox(height: 16),
-                      _buildPublishPanel(),
-                    ],
-                  );
-                  return SingleChildScrollView(
-                    padding: EdgeInsets.fromLTRB(
-                      horizontalPadding,
-                      8,
-                      horizontalPadding,
-                      32,
-                    ),
-                    child: Center(
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 1320),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            _EditorHeading(clips: _project.clips.length),
-                            const SizedBox(height: 16),
-                            _StatusNotice(
-                              message: _status,
-                              busy: _compiling || _publishing || _clearing,
-                              failed: _status.startsWith('Ошибка') ||
-                                  _status.startsWith('Не удалось'),
-                            ),
-                            const SizedBox(height: 16),
-                            if (wide)
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(
-                                    flex: 7,
-                                    child: _buildWorkspace(selected),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  SizedBox(width: 420, child: sidePanel),
-                                ],
-                              )
-                            else ...[
-                              _buildWorkspace(selected),
-                              const SizedBox(height: 16),
-                              sidePanel,
-                            ],
-                          ],
-                        ),
+              top: false,
+              child: Column(
+                children: [
+                  _FlowStepper(
+                    current: _step,
+                    onSelected: _selectStep,
+                  ),
+                  const Divider(),
+                  Expanded(
+                    child: AnimatedSwitcher(
+                      duration: reduceMotion
+                          ? Duration.zero
+                          : const Duration(milliseconds: 180),
+                      switchInCurve: Curves.easeOutCubic,
+                      switchOutCurve: Curves.easeInCubic,
+                      child: KeyedSubtree(
+                        key: ValueKey(_step),
+                        child: _buildCurrentStep(),
                       ),
                     ),
-                  );
-                },
+                  ),
+                  const Divider(),
+                  _FlowFooter(
+                    showBack: _step != _FlowStep.media,
+                    onBack: busy ? null : _previousStep,
+                    primaryLabel: _nextStepLabel,
+                    onPrimary: (_step == _FlowStep.media ? !busy : canContinue)
+                        ? _nextStep
+                        : null,
+                    busy: busy,
+                  ),
+                ],
               ),
             ),
     );
@@ -1473,16 +1669,6 @@ IconData _clipKindIcon(ClipKind kind) => switch (kind) {
       ClipKind.ticker => Icons.view_headline_outlined,
     };
 
-String _clipKindName(ClipKind kind) => switch (kind) {
-      ClipKind.image => 'IMAGE',
-      ClipKind.gif => 'GIF',
-      ClipKind.mp4 => 'MP4',
-      ClipKind.textCard => 'TEXT',
-      ClipKind.logoCard => 'LOGO',
-      ClipKind.ambient => 'AMBIENT',
-      ClipKind.ticker => 'TICKER',
-    };
-
 String _clipCountLabel(int count) {
   final tail = count % 100;
   if (tail >= 11 && tail <= 14) return 'клипов';
@@ -1493,145 +1679,201 @@ String _clipCountLabel(int count) {
   };
 }
 
-class _StudioPanel extends StatelessWidget {
-  const _StudioPanel({
-    required this.title,
-    required this.subtitle,
-    required this.child,
-    this.padding = const EdgeInsets.all(20),
+class _FlowStepper extends StatelessWidget {
+  const _FlowStepper({
+    required this.current,
+    required this.onSelected,
   });
 
-  final String title;
-  final String subtitle;
-  final Widget child;
-  final EdgeInsetsGeometry padding;
+  final _FlowStep current;
+  final ValueChanged<_FlowStep> onSelected;
 
   @override
-  Widget build(BuildContext context) => Card(
-        child: Padding(
-          padding: padding,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+  Widget build(BuildContext context) {
+    const labels = ['Медиа', 'Кадр', 'Таймлайн', 'Загрузка'];
+    const icons = [
+      Icons.video_library_outlined,
+      Icons.crop_free,
+      Icons.view_timeline_outlined,
+      Icons.rocket_launch_outlined,
+    ];
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final itemWidth =
+            constraints.maxWidth >= 440 ? constraints.maxWidth / 4 : 110.0;
+        return SizedBox(
+          height: 58,
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (final step in _FlowStep.values)
+                  SizedBox(
+                    width: itemWidth,
+                    height: 58,
+                    child: _StepButton(
+                      key: ValueKey('flow-step-${step.name}'),
+                      label: labels[step.index],
+                      icon: icons[step.index],
+                      selected: step == current,
+                      enabled: true,
+                      onPressed: () => onSelected(step),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _StepButton extends StatelessWidget {
+  const _StepButton({
+    super.key,
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        selected: selected,
+        enabled: enabled,
+        child: InkWell(
+          onTap: enabled ? onPressed : null,
+          child: Stack(
+            alignment: Alignment.center,
             children: [
-              Padding(
-                padding: padding == const EdgeInsets.all(20)
-                    ? EdgeInsets.zero
-                    : const EdgeInsets.symmetric(horizontal: 8),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title, style: Theme.of(context).textTheme.titleLarge),
-                    const SizedBox(height: 4),
-                    Text(subtitle),
-                  ],
-                ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    icon,
+                    size: 19,
+                    color: enabled
+                        ? selected
+                            ? _ZColors.primary
+                            : _ZColors.textMuted
+                        : _ZColors.borderStrong,
+                  ),
+                  const SizedBox(width: 7),
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.fade,
+                      softWrap: false,
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                            color: enabled
+                                ? selected
+                                    ? _ZColors.text
+                                    : _ZColors.textMuted
+                                : _ZColors.borderStrong,
+                            fontWeight:
+                                selected ? FontWeight.w700 : FontWeight.w500,
+                          ),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 18),
-              child,
+              if (selected)
+                const Align(
+                  alignment: Alignment.bottomCenter,
+                  child: SizedBox(
+                    width: 42,
+                    height: 3,
+                    child: ColoredBox(color: _ZColors.primary),
+                  ),
+                ),
             ],
           ),
         ),
       );
 }
 
-class _EditorHeading extends StatelessWidget {
-  const _EditorHeading({required this.clips});
+class _FlowFooter extends StatelessWidget {
+  const _FlowFooter({
+    required this.showBack,
+    required this.onBack,
+    required this.primaryLabel,
+    required this.onPrimary,
+    required this.busy,
+  });
 
-  final int clips;
+  final bool showBack;
+  final VoidCallback? onBack;
+  final String primaryLabel;
+  final VoidCallback? onPrimary;
+  final bool busy;
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        child: Row(
           children: [
-            Text('Редактор шоу',
-                style: Theme.of(context).textTheme.headlineSmall),
-            const SizedBox(height: 6),
-            Text(
-              clips == 0
-                  ? 'Добавьте первый клип и соберите шоу для круглого дисплея.'
-                  : 'Настройте композицию, порядок и загрузите готовое шоу на значок.',
+            if (showBack) ...[
+              OutlinedButton.icon(
+                key: const ValueKey('flow-back'),
+                onPressed: onBack,
+                icon: const Icon(Icons.arrow_back),
+                label: const Text('Назад'),
+              ),
+              const SizedBox(width: 10),
+            ],
+            Expanded(
+              child: FilledButton.icon(
+                key: const ValueKey('flow-next'),
+                onPressed: onPrimary,
+                icon: busy
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.arrow_forward),
+                label: Text(primaryLabel),
+              ),
             ),
           ],
         ),
       );
 }
 
-class _StatusNotice extends StatelessWidget {
-  const _StatusNotice({
-    required this.message,
-    required this.busy,
-    required this.failed,
+class _EditorTool extends StatelessWidget {
+  const _EditorTool({
+    required this.label,
+    required this.icon,
+    required this.onPressed,
+    this.danger = false,
   });
 
-  final String message;
-  final bool busy;
-  final bool failed;
+  final String label;
+  final IconData icon;
+  final VoidCallback? onPressed;
+  final bool danger;
 
   @override
-  Widget build(BuildContext context) {
-    final tone = failed ? _ZColors.danger : _ZColors.primary;
-    return Semantics(
-      liveRegion: true,
-      label: message,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        decoration: BoxDecoration(
-          color: tone.withValues(alpha: 0.09),
-          border: Border.all(color: tone.withValues(alpha: 0.28)),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          children: [
-            if (busy)
-              const SizedBox.square(
-                dimension: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            else
-              Icon(
-                failed ? Icons.error_outline : Icons.info_outline,
-                size: 19,
-                color: tone,
-              ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                message,
-                style: const TextStyle(
-                  color: _ZColors.text,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ClipKindBadge extends StatelessWidget {
-  const _ClipKindBadge({required this.kind});
-
-  final ClipKind kind;
-
-  @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-        decoration: BoxDecoration(
-          color: _ZColors.surfaceRaised,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: _ZColors.border),
-        ),
-        child: Text(
-          _clipKindName(kind),
-          style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: _ZColors.primary,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 0.8,
-              ),
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(right: 4),
+        child: TextButton.icon(
+          onPressed: onPressed,
+          icon: Icon(icon, size: 20),
+          label: Text(label),
+          style: TextButton.styleFrom(
+            foregroundColor: danger ? _ZColors.danger : _ZColors.textMuted,
+            minimumSize: const Size(48, 48),
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+          ),
         ),
       );
 }
@@ -1643,7 +1885,7 @@ class _ProjectCount extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         decoration: BoxDecoration(
           color: _ZColors.surfaceRaised,
           borderRadius: BorderRadius.circular(10),
@@ -1663,73 +1905,7 @@ class _LoadingStudio extends StatelessWidget {
   const _LoadingStudio();
 
   @override
-  Widget build(BuildContext context) => SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 760),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const LinearProgressIndicator(minHeight: 5),
-                  const SizedBox(height: 18),
-                  Text(
-                    'Открываем проект',
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'Восстанавливаем клипы и настройки редактора…',
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-}
-
-class _EmptyProject extends StatelessWidget {
-  const _EmptyProject();
-
-  @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 52),
-        decoration: BoxDecoration(
-          color: _ZColors.surfaceRaised,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: _ZColors.border),
-        ),
-        child: Column(
-          children: [
-            Container(
-              width: 72,
-              height: 72,
-              decoration: BoxDecoration(
-                color: _ZColors.primary.withValues(alpha: 0.12),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.video_collection_outlined,
-                size: 34,
-                color: _ZColors.primary,
-              ),
-            ),
-            const SizedBox(height: 18),
-            Text(
-              'Начните с первого клипа',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Добавьте картинки, GIF или MP4 — приложение само подготовит их для значка',
-              textAlign: TextAlign.center,
-            ),
-          ],
-        ),
+  Widget build(BuildContext context) => const SafeArea(
+        child: Center(child: CircularProgressIndicator()),
       );
 }
