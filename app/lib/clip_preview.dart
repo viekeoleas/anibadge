@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'media_timeline.dart';
 import 'project_model.dart';
@@ -12,6 +12,19 @@ import 'show_compiler.dart';
 import 'video_manifest.dart';
 
 const int _draftDecodeWidth = 480;
+const double canvasSnapDistancePx = 14;
+const double canvasAngleSnapTolerance = math.pi / 48;
+
+double snapCanvasAxis(double value, double threshold) =>
+    value.abs() <= threshold ? 0 : value;
+
+double snapCanvasAngle(double radians) {
+  const step = math.pi / 2;
+  final target = (radians / step).round() * step;
+  return (radians - target).abs() <= canvasAngleSnapTolerance
+      ? target.toDouble()
+      : radians;
+}
 
 class DraftClipCanvas extends StatefulWidget {
   const DraftClipCanvas({
@@ -34,6 +47,44 @@ class DraftClipCanvas extends StatefulWidget {
 class _DraftClipCanvasState extends State<DraftClipCanvas> {
   late double _startScale;
   late double _startRotation;
+  late double _rawOffsetX;
+  late double _rawOffsetY;
+  bool _snappedX = false;
+  bool _snappedY = false;
+  bool _snappedAngle = false;
+  int _snappedAngleDegrees = 0;
+
+  void _setSnapState({
+    required bool x,
+    required bool y,
+    required bool angle,
+    required int angleDegrees,
+  }) {
+    final enteredSnap =
+        (x && !_snappedX) || (y && !_snappedY) || (angle && !_snappedAngle);
+    if (x == _snappedX &&
+        y == _snappedY &&
+        angle == _snappedAngle &&
+        angleDegrees == _snappedAngleDegrees) {
+      return;
+    }
+    setState(() {
+      _snappedX = x;
+      _snappedY = y;
+      _snappedAngle = angle;
+      _snappedAngleDegrees = angleDegrees;
+    });
+    if (enteredSnap) HapticFeedback.selectionClick();
+  }
+
+  void _clearSnapState() {
+    if (!_snappedX && !_snappedY && !_snappedAngle) return;
+    setState(() {
+      _snappedX = false;
+      _snappedY = false;
+      _snappedAngle = false;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -45,7 +96,22 @@ class _DraftClipCanvasState extends State<DraftClipCanvas> {
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           border: widget.showBorder
-              ? Border.all(color: const Color(0xFF90CAF9), width: 2)
+              ? Border.all(
+                  color: Theme.of(context).colorScheme.primary,
+                  width: 2,
+                )
+              : null,
+          boxShadow: widget.showBorder
+              ? [
+                  BoxShadow(
+                    color: Theme.of(context)
+                        .colorScheme
+                        .primary
+                        .withValues(alpha: 0.14),
+                    blurRadius: 28,
+                    spreadRadius: -8,
+                  ),
+                ]
               : null,
         ),
         child: ClipOval(
@@ -75,28 +141,91 @@ class _DraftClipCanvasState extends State<DraftClipCanvas> {
           ),
         ),
       );
+      final canvas = Stack(
+        alignment: Alignment.center,
+        children: [
+          surface,
+          if (_snappedX)
+            IgnorePointer(
+              child: Container(
+                key: const ValueKey('canvas-guide-x'),
+                width: 1.5,
+                height: diameter,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
+          if (_snappedY)
+            IgnorePointer(
+              child: Container(
+                key: const ValueKey('canvas-guide-y'),
+                width: diameter,
+                height: 1.5,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
+          if (_snappedAngle)
+            Positioned(
+              top: 14,
+              child: IgnorePointer(
+                child: Container(
+                  key: const ValueKey('canvas-guide-angle'),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primary,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    'Угол $_snappedAngleDegrees°',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onPrimary,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      );
       return Center(
         child: widget.interactive
             ? GestureDetector(
                 onScaleStart: (_) {
                   _startScale = widget.clip.scale;
                   _startRotation = widget.clip.rotation;
+                  _rawOffsetX = widget.clip.offsetX;
+                  _rawOffsetY = widget.clip.offsetY;
                 },
                 onScaleUpdate: (details) {
+                  _rawOffsetX = (_rawOffsetX +
+                          details.focalPointDelta.dx * 800 / diameter)
+                      .clamp(-800, 800);
+                  _rawOffsetY = (_rawOffsetY +
+                          details.focalPointDelta.dy * 800 / diameter)
+                      .clamp(-800, 800);
+                  final axisThreshold = canvasSnapDistancePx * 800 / diameter;
+                  final offsetX = snapCanvasAxis(_rawOffsetX, axisThreshold);
+                  final offsetY = snapCanvasAxis(_rawOffsetY, axisThreshold);
+                  final rawRotation = _startRotation + details.rotation;
+                  final rotation = snapCanvasAngle(rawRotation);
+                  final snappedAngle = rotation != rawRotation;
+                  _setSnapState(
+                    x: offsetX == 0 && _rawOffsetX != 0,
+                    y: offsetY == 0 && _rawOffsetY != 0,
+                    angle: snappedAngle,
+                    angleDegrees: (rotation * 180 / math.pi).round(),
+                  );
                   widget.onChanged(widget.clip.copyWith(
                     scale: (_startScale * details.scale).clamp(0.1, 8),
-                    rotation: _startRotation + details.rotation,
-                    offsetX: (widget.clip.offsetX +
-                            details.focalPointDelta.dx * 800 / diameter)
-                        .clamp(-800, 800),
-                    offsetY: (widget.clip.offsetY +
-                            details.focalPointDelta.dy * 800 / diameter)
-                        .clamp(-800, 800),
+                    rotation: rotation,
+                    offsetX: offsetX,
+                    offsetY: offsetY,
                   ));
                 },
-                child: surface,
+                onScaleEnd: (_) => _clearSnapState(),
+                child: canvas,
               )
-            : surface,
+            : canvas,
       );
     });
   }
